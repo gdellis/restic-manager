@@ -1,6 +1,7 @@
 use crate::backup::Backup;
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
+use crate::notifications::NotificationManager;
 use chrono::Local;
 use chrono::Timelike;
 use cron::Schedule;
@@ -88,14 +89,26 @@ impl Scheduler {
                     match job_name {
                         Some(name) => {
                             let config = self.config.clone();
+                            let job = config.config.get_job(&name).cloned();
                             tokio::spawn(async move {
                                 info!(job = %name, "Starting scheduled backup");
+
+                                let notifier = job
+                                    .as_ref()
+                                    .map(|j| NotificationManager::new(&config, j.notifications.clone()));
+
                                 match Backup::run(&config, &name) {
                                     Ok(result) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
+                                        if let Some(ref n) = notifier {
+                                            let _ = n.notify_success(&name, result.snapshot_id.as_deref());
+                                        }
                                     }
                                     Err(e) => {
                                         error!(job = %name, error = %e, "Backup failed");
+                                        if let Some(ref n) = notifier {
+                                            let _ = n.notify_failure(&name, &e.to_string());
+                                        }
                                     }
                                 }
                             });
