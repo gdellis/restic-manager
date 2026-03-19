@@ -224,4 +224,125 @@ mod tests {
         let result = Backup::execute_hooks(&hooks, "test");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_parse_backup_output_valid() {
+        let json = r#"{"summary":{"files_new":1,"files_changed":2,"files_unmodified":3,"dirs_new":1,"dirs_changed":0,"dirs_unmodified":2,"data_blobs":5,"tree_blobs":3,"data_added":1024,"duration":1.5},"snapshot_id":"abc123"}"#;
+        let result = Backup::parse_backup_output(json);
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.files_new, 1);
+        assert_eq!(r.files_changed, 2);
+        assert_eq!(r.files_unmodified, 3);
+        assert_eq!(r.data_added, 1024);
+        assert_eq!(r.snapshot_id, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_backup_output_no_summary() {
+        let result = Backup::parse_backup_output("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_backup_output_empty() {
+        let result = Backup::parse_backup_output("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_backup_output_missing_fields() {
+        let json = r#"{"summary":{}}"#;
+        let result = Backup::parse_backup_output(json);
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.files_new, 0);
+        assert_eq!(r.data_added, 0);
+        assert_eq!(r.snapshot_id, None);
+    }
+
+    #[test]
+    fn test_hooks_multiple_wait() {
+        let hooks = vec![Hook::Wait { seconds: 0 }, Hook::Wait { seconds: 0 }];
+        let result = Backup::execute_hooks(&hooks, "test");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_hooks_command_failure_silent() {
+        let hooks = vec![Hook::Command {
+            command: "echo".to_string(),
+            args: vec!["fail".to_string()],
+        }];
+        let result = Backup::execute_hooks(&hooks, "test");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_missing_repository() {
+        let mut repositories = std::collections::HashMap::new();
+        repositories.insert(
+            "test".to_string(),
+            RepoConfig {
+                repo: "/tmp/test-repo".to_string(),
+                password_key: "test-password".to_string(),
+            },
+        );
+
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "nonexistent".to_string(),
+                paths: vec!["/tmp".into()],
+                exclude: vec![],
+                schedule: None,
+                retention: None,
+                notifications: Default::default(),
+                pre_backup: vec![],
+                post_backup: vec![],
+            },
+        );
+
+        let config = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets {
+                values: std::collections::HashMap::new(),
+                telegram: None,
+            },
+        };
+
+        let result = Backup::run(&config, "test-job");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_password() {
+        let repositories = std::collections::HashMap::new();
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "test".to_string(),
+                paths: vec!["/tmp".into()],
+                exclude: vec![],
+                schedule: None,
+                retention: None,
+                notifications: Default::default(),
+                pre_backup: vec![],
+                post_backup: vec![],
+            },
+        );
+
+        let config = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets {
+                values: std::collections::HashMap::new(),
+                telegram: None,
+            },
+        };
+
+        let result = Backup::run(&config, "test-job");
+        assert!(result.is_err());
+    }
 }

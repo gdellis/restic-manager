@@ -248,4 +248,88 @@ mod tests {
         let result = manager.notify_success("test-job", Some("snap123"));
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_notification_manager_notify_failure_flag_enabled() {
+        let config = test_config();
+        let job_config = NotificationConfig {
+            on_failure: true,
+            on_success: false,
+        };
+        let manager = NotificationManager::new(&config, job_config);
+        let result = manager.notify_failure("test-job", "error");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_notification_manager_notify_success_flag_enabled() {
+        let config = test_config();
+        let job_config = NotificationConfig {
+            on_failure: false,
+            on_success: true,
+        };
+        let manager = NotificationManager::new(&config, job_config);
+        let result = manager.notify_success("test-job", Some("snap123"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_configured_with_empty_bot_token() {
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: None,
+                chat_id: Some("123".to_string()),
+            }),
+        };
+        let notifications = Notifications::new(&config);
+        assert!(!notifications.is_configured());
+    }
+
+    #[test]
+    fn test_is_configured_with_empty_chat_id() {
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: Some("token".to_string()),
+                chat_id: None,
+            }),
+        };
+        let notifications = Notifications::new(&config);
+        assert!(!notifications.is_configured());
+    }
+
+    #[test]
+    fn test_is_configured_with_both_none() {
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: None,
+                chat_id: None,
+            }),
+        };
+        let notifications = Notifications::new(&config);
+        assert!(!notifications.is_configured());
+    }
+
+    #[test]
+    fn test_is_configured_full() {
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: Some("token".to_string()),
+                chat_id: Some("chat123".to_string()),
+            }),
+        };
+        let notifications = Notifications::new(&config);
+        assert!(notifications.is_configured());
+    }
 }

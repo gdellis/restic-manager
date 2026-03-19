@@ -162,4 +162,34 @@ mod tests {
         let result = Repository::init(&resolved, "test");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_check_missing_repository() {
+        let resolved = test_config();
+        let result = Repository::check(&resolved, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unlock_missing_repository() {
+        let resolved = test_config();
+        let result = Repository::unlock(&resolved, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_init_missing_password() {
+        let repositories = std::collections::HashMap::new();
+        let config = Config {
+            repositories,
+            ..Default::default()
+        };
+        let secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: None,
+        };
+        let resolved = ResolvedConfig { config, secrets };
+        let result = Repository::init(&resolved, "test");
+        assert!(result.is_err());
+    }
 }
