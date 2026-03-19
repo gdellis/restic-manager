@@ -131,29 +131,35 @@ cargo fmt
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         CLI Layer                            │
-│  run · restore · prune · list · check · daemon · jobs       │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-   ┌─────────┐          ┌───────────┐         ┌───────────┐
-   │  Config │          │  Secrets  │         │ Scheduler │
-   └─────────┘          └───────────┘         └───────────┘
-        │                     │                     │
-        └─────────────────────┼─────────────────────┘
-                              ▼
-                    ┌─────────────────┐
-                    │     Backup      │
-                    └─────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-         ┌─────────┐    ┌───────────┐   ┌────────────┐
-         │  Restic │    │  Telegram │   │   Hooks    │
-         └─────────┘    └───────────┘   └────────────┘
+```mermaid
+flowchart TB
+    CLI["CLI Layer<br/>run · restore · prune · list · check · daemon · jobs"]
+
+    subgraph Core[" "]
+        Config[Config]
+        Secrets[Secrets]
+        Scheduler[Scheduler]
+    end
+
+    subgraph Executor[" "]
+        Backup[Backup]
+    end
+
+    subgraph External[" "]
+        Restic[Restic]
+        Telegram[Telegram]
+        Hooks[Hooks]
+    end
+
+    CLI --> Config
+    CLI --> Secrets
+    CLI --> Scheduler
+    Config --> Backup
+    Secrets --> Backup
+    Scheduler --> Backup
+    Backup --> Restic
+    Backup --> Telegram
+    Backup --> Hooks
 ```
 
 ## License
