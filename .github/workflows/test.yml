@@ -42,8 +42,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Lint Markdown
-        uses: DavidAnson/markdownlint-cli2-action@v22
+      - name: Get changed Markdown files
+        uses: tj-actions/changed-files@v47
+        id: changed-files
         with:
-          config: '.markdownlint.json'
-          globs: '**/*.md'
+          files: '**/*.md'
+          separator: ","
+
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@v22.0.0
+        if: steps.changed-files.outputs.any_changed == 'true'
+        with:
+          globs: ${{ steps.changed-files.outputs.all_changed_files }}

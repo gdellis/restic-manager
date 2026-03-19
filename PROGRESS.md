@@ -10,9 +10,9 @@
 
 ## Phase 2: Repository Operations
 
-- [ ] Repository init command
-- [ ] Repository check command
-- [ ] Repository unlock command
+- [x] Repository init command
+- [x] Repository check command
+- [x] Repository unlock command
 
 ## Phase 3: Backup/Restore
 
