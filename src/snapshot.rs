@@ -393,4 +393,70 @@ mod tests {
         let result = SnapshotManager::forget(&config, "test-job", false);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_parse_snapshots_json() {
+        let json = r#"[{"id":"abc123","short_id":"abc123","time":"2024-01-15T10:30:00Z","hostname":"server1","tags":["daily"],"paths":["/home"]}]"#;
+        let result = SnapshotManager::parse_snapshots(json);
+        assert!(result.is_ok());
+        let list = result.unwrap();
+        assert_eq!(list.snapshots.len(), 1);
+        assert_eq!(list.snapshots[0].id, "abc123");
+        assert_eq!(list.snapshots[0].hostname.as_deref(), Some("server1"));
+        assert_eq!(list.snapshots[0].tags, vec!["daily"]);
+    }
+
+    #[test]
+    fn test_parse_forget_output_json() {
+        let output = r#"{"removed":[{"id":"snap1","short_id":"abc"}],"kept":3}"#;
+        let result = SnapshotManager::parse_forget_output(output);
+        assert!(result.is_ok());
+        let removed = result.unwrap();
+        assert_eq!(removed, vec!["snap1"]);
+    }
+
+    #[test]
+    fn test_forget_missing_password() {
+        let mut repositories = std::collections::HashMap::new();
+        repositories.insert(
+            "test".to_string(),
+            RepoConfig {
+                repo: "/tmp/test-repo".to_string(),
+                password_key: "nonexistent-key".to_string(),
+            },
+        );
+
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "test".to_string(),
+                paths: vec!["/tmp".into()],
+                exclude: vec![],
+                schedule: None,
+                retention: Some(RetentionPolicy::default()),
+                notifications: Default::default(),
+                pre_backup: vec![],
+                post_backup: vec![],
+            },
+        );
+
+        let config = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets {
+                values: std::collections::HashMap::new(),
+                telegram: None,
+            },
+        };
+
+        let result = SnapshotManager::forget(&config, "test-job", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prune_missing_job() {
+        let config = test_config();
+        let result = SnapshotManager::prune(&config, "nonexistent");
+        assert!(result.is_err());
+    }
 }
