@@ -9,48 +9,19 @@ on:
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    container:
+      image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-tarpaulin-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Run tarpaulin
-        run: cargo tarpaulin --out Html
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: tarpaulin-report.html
-
-      - name: Check coverage threshold
+      - name: Generate code coverage
         run: |
-          cargo tarpaulin --message-format=json --out /dev/null 2> coverage.json
-          COVERAGE=$(cat coverage.json | jq -r '.line_rate')
-          echo "Line coverage: $COVERAGE"
-          if (( $(echo "$COVERAGE < 0.3" | bc -l) )); then
-            echo "Coverage is below threshold (30%)"
-            exit 1
-          fi
+          cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
