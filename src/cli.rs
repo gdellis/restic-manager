@@ -3,6 +3,7 @@ use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::repository::Repository;
 use crate::restore::Restore;
+use crate::snapshot::SnapshotManager;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -72,10 +73,15 @@ pub fn cli_run() -> Result<(), AppError> {
             }
         }
         Commands::Prune { name } => {
-            println!("Pruning job: {}", name);
+            let removed = SnapshotManager::apply_retention(&config, &name, false)?;
+            println!("Pruned {} snapshots for job '{}'", removed.len(), name);
         }
         Commands::List { name } => {
-            println!("Listing snapshots for: {}", name);
+            let snapshots = SnapshotManager::list(&config, &name)?;
+            println!("Snapshots for job '{}':", name);
+            for snap in snapshots.snapshots {
+                println!("  {}  {}  {:?}", snap.short_id, snap.time, snap.paths);
+            }
         }
         Commands::Check { name } => {
             Repository::check(&config, &name)?;
