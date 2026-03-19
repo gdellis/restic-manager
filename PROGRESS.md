@@ -37,10 +37,10 @@
 
 ## Phase 6: Notifications
 
-- [ ] Telegram bot integration
-- [ ] Failure notifications
-- [ ] Success notifications
-- [ ] Rate limiting
+- [x] Telegram bot integration
+- [x] Failure notifications
+- [x] Success notifications
+- [x] Rate limiting
 
 ---
 

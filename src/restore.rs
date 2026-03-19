@@ -171,4 +171,23 @@ mod tests {
         let result = Restore::restore_latest(&resolved, "nonexistent", "/tmp");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_restore_snapshot_missing_job() {
+        let resolved = test_config();
+        let result = Restore::restore_snapshot(&resolved, "nonexistent", "snap123", "/tmp");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_latest_snapshot_empty() {
+        let result = Restore::find_latest_snapshot("/tmp/repo", "password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_latest_snapshot_invalid_json() {
+        let result = Restore::find_latest_snapshot("/tmp/repo", "password");
+        assert!(result.is_err());
+    }
 }

@@ -16,7 +16,7 @@
 <!-- Workflow -->
 ![Latest][Latest] ![Contributors][Contributors] ![Open PRs][Open PR]
 [![Build][Build-svg]][Build-Workflow] [![Tests][Test-svg]][Test-Workflow] [![PR
-Review][PR-Review-svg]][PR-Review-Agent]
+Review][PR-Review-svg]][PR-Review-Agent] [![Coverage][Coverage-svg]][Coverage-Workflow]
 
 <!-- Badge Link References -->
 [Latest]: https://badgen.net/github/tag/gdellis/restic-manager
@@ -30,6 +30,9 @@ Review][PR-Review-svg]][PR-Review-Agent]
 
 [PR-Review-svg]: https://github.com/gdellis/restic-manager/actions/workflows/pr_agent.yml/badge.svg
 [PR-Review-Agent]: https://github.com/gdellis/restic-manager/actions/workflows/pr_agent.yml
+
+[Coverage-svg]: https://github.com/gdellis/restic-manager/actions/workflows/coverage.yml/badge.svg
+[Coverage-Workflow]: https://github.com/gdellis/restic-manager/actions/workflows/coverage.yml
 
 ---
 
@@ -165,6 +168,7 @@ cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
+cargo coverage
 ```
 
 ## Architecture
