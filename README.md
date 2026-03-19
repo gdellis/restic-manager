@@ -1,26 +1,124 @@
-# Restic Manager
+# restic-manager
 
-A Rust project for managing restic backups with scheduling and notifications.
+> CLI tool for managing restic backups with scheduling and notifications
 
-## Getting Started
+`restic-manager` simplifies backup management by providing a unified interface to configure jobs, schedule backups with cron, and receive notifications via Telegram.
+
+## Features
+
+- **Job-based backup management** — Define backup jobs in YAML with paths, exclusions, and retention policies
+- **Scheduled execution** — Run backups automatically via cron expressions
+- **Telegram notifications** — Get notified on job success or failure
+- **Pre/post backup hooks** — Run custom commands before or after backups
+- **Retention policies** — Automatic snapshot pruning with configurable keep rules
+- **Multiple repositories** — Manage multiple restic repositories from one config
+
+## Quick Start
+
+### Prerequisites
+
+- [restic](https://restic.net/) installed and in PATH
+- Rust 1.75+
+
+### Build
 
 ```bash
 cargo build --release
-cargo run --release
 ```
 
-## Commands
+### Configuration
+
+Create `~/.config/restic-manager/config.yaml`:
+
+```yaml
+repositories:
+  local:
+    repo: /backup/my-repo
+    password_key: restic-password
+
+jobs:
+  documents:
+    repository: local
+    paths:
+      - /home/user/documents
+    exclude:
+      - "*.tmp"
+      - ".cache/**"
+    schedule: "0 2 * * *"  # 2 AM daily
+    retention:
+      keep-daily: 7
+      keep-weekly: 4
+      keep-monthly: 6
+    notifications:
+      on_failure: true
+      on_success: false
+```
+
+Create `~/.config/restic-manager/secrets.yaml` (gitignored):
+
+```yaml
+restic-password: your-secret-password
+telegram:
+  bot_token: your-bot-token
+  chat_id: your-chat-id
+```
+
+### Usage
 
 ```bash
-cargo run -- run <job>       # Run a backup job
-cargo run -- restore <job>   # Restore from a backup
-cargo run -- prune <job>     # Prune old snapshots
-cargo run -- list <job>      # List snapshots
-cargo run -- check <job>     # Check repository integrity
-cargo run -- daemon          # Run the scheduler daemon
-cargo run -- jobs            # List all jobs
-cargo run -- repos           # List all repositories
+# Run a backup job
+restic-manager run documents
+
+# Restore latest backup
+restic-manager restore documents
+
+# Restore specific snapshot
+restic-manager restore documents --snapshot abc123
+
+# List snapshots
+restic-manager list documents
+
+# Check repository integrity
+restic-manager check documents
+
+# Prune old snapshots
+restic-manager prune documents
+
+# Start scheduler daemon
+restic-manager daemon
+
+# List configured jobs and repositories
+restic-manager jobs
+restic-manager repos
+
+# Initialize a new repository
+restic-manager init local
 ```
+
+## Configuration Reference
+
+### config.yaml
+
+| Field                            | Description                                 |
+| -------------------------------- | ------------------------------------------- |
+| `repositories.<name>.repo`         | Restic repository path                      |
+| `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
+| `jobs.<name>.repository`           | Repository name to use                      |
+| `jobs.<name>.paths`                | List of paths to backup                    |
+| `jobs.<name>.exclude`              | Patterns to exclude                         |
+| `jobs.<name>.schedule`             | Cron expression for scheduling             |
+| `jobs.<name>.retention`            | Snapshot retention policy                   |
+| `jobs.<name>.notifications`        | Notification preferences                    |
+| `jobs.<name>.pre_backup`           | Commands to run before backup               |
+| `jobs.<name>.post_backup`          | Commands to run after backup                |
+
+### secrets.yaml
+
+| Field              | Description                                          |
+| ------------------ | ---------------------------------------------------- |
+| `<key>`            | Arbitrary key-value pairs referenced by password_key |
+| `telegram.bot_token` | Telegram bot token                                   |
+| `telegram.chat_id`   | Telegram chat ID for notifications                   |
 
 ## Development
 
@@ -31,21 +129,32 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 ```
 
-## Pre-commit Hooks
+## Architecture
 
-Install pre-commit hooks:
-
-```bash
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
 ```
-
-## GitHub Actions
-
-- **Test**: Runs on push to main/develop and PRs - tests, clippy, fmt
-- **Build**: Runs on tags (`v*`) and PRs - cross-platform builds
-- **PR Review**: AI-powered PR review using OpenCode
+┌─────────────────────────────────────────────────────────────┐
+│                         CLI Layer                            │
+│  run · restore · prune · list · check · daemon · jobs       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+   ┌─────────┐          ┌───────────┐         ┌───────────┐
+   │  Config │          │  Secrets  │         │ Scheduler │
+   └─────────┘          └───────────┘         └───────────┘
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              ▼
+                    ┌─────────────────┐
+                    │     Backup      │
+                    └─────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+         ┌─────────┐    ┌───────────┐   ┌────────────┐
+         │  Restic │    │  Telegram │   │   Hooks    │
+         └─────────┘    └───────────┘   └────────────┘
+```
 
 ## License
 
