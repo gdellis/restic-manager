@@ -147,6 +147,7 @@ pub struct Job {
     pub post_backup: Vec<Hook>,
 }
 
+#[derive(Clone)]
 pub struct ResolvedConfig {
     pub config: Config,
     pub secrets: Secrets,

@@ -30,10 +30,10 @@
 
 ## Phase 5: Scheduler
 
-- [ ] Cron parsing and validation
-- [ ] Daemon mode
-- [ ] Job queue management
-- [ ] Graceful shutdown
+- [x] Cron parsing and validation
+- [x] Daemon mode
+- [x] Job queue management
+- [x] Graceful shutdown
 
 ## Phase 6: Notifications
 
