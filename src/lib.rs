@@ -1,3 +1,6 @@
-pub fn run() {
-    println!("Restic Manager");
-}
+pub mod cli;
+pub mod config;
+pub mod errors;
+pub mod secrets;
+
+pub use cli::cli_run;
