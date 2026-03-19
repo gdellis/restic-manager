@@ -24,9 +24,9 @@
 
 ## Phase 4: Snapshot Management
 
-- [ ] List snapshots
-- [ ] Retention policies (forget)
-- [ ] Prune operations
+- [x] List snapshots
+- [x] Retention policies (forget)
+- [x] Prune operations
 
 ## Phase 5: Scheduler
 
