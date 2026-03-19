@@ -1,8 +1,37 @@
-# restic-manager
+# Restic Manager
 
-<p align="center">
-<img src="resources/logo.jpg" width="200">
-</p>
+<picture>
+ <img alt="Logo" src="resources/logo.jpg" width=400px>
+</picture>
+
+---
+
+<!-- License -->
+
+![GitHub License](https://img.shields.io/github/license/gdellis/restic-manager?style=for-the-badge&logoSize=auto&link=LICENSE)
+
+<!-- Made With Rust -->
+![Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&style=for-the-badge)
+
+<!-- Workflow -->
+![Latest][Latest] ![Contributors][Contributors] ![Open PRs][Open PR]
+[![Build][Build-svg]][Build-Workflow] [![Tests][Test-svg]][Test-Workflow] [![PR
+Review][PR-Review-svg]][PR-Review-Agent]
+
+<!-- Badge Link References -->
+[Latest]: https://badgen.net/github/tag/gdellis/restic-manager
+[Contributors]: https://badgen.net/github/contributors/gdellis/restic-manager
+[Open PR]: https://badgen.net/github/open-prs/gdellis/restic-manager
+
+[Build-svg]: https://github.com/gdellis/restic-manager/actions/workflows/build.yml/badge.svg
+[Build-Workflow]: https://github.com/gdellis/restic-manager/actions/workflows/build.yml
+[Test-svg]: https://github.com/gdellis/restic-manager/actions/workflows/test.yml/badge.svg
+[Test-Workflow]: https://github.com/gdellis/restic-manager/actions/workflows/test.yml
+
+[PR-Review-svg]: https://github.com/gdellis/restic-manager/actions/workflows/pr_agent.yml/badge.svg
+[PR-Review-Agent]: https://github.com/gdellis/restic-manager/actions/workflows/pr_agent.yml
+
+---
 
 > CLI tool for managing restic backups with scheduling and notifications
 
@@ -12,12 +41,15 @@ Telegram.
 
 ## Features
 
-- **Job-based backup management** — Define backup jobs in YAML with paths, exclusions, and retention policies
+- **Job-based backup management** — Define backup jobs in YAML with paths,
+  exclusions, and retention policies
 - **Scheduled execution** — Run backups automatically via cron expressions
 - **Telegram notifications** — Get notified on job success or failure
 - **Pre/post backup hooks** — Run custom commands before or after backups
-- **Retention policies** — Automatic snapshot pruning with configurable keep rules
-- **Multiple repositories** — Manage multiple restic repositories from one config
+- **Retention policies** — Automatic snapshot pruning with configurable keep
+  rules
+- **Multiple repositories** — Manage multiple restic repositories from one
+  config
 
 ## Quick Start
 
@@ -169,5 +201,7 @@ flowchart TB
 ```
 
 ## License
+
+![GitHub License](https://img.shields.io/github/license/gdellis/restic-manager)
 
 MIT

@@ -16,11 +16,11 @@
 
 ## Phase 3: Backup/Restore
 
-- [ ] Backup execution
-- [ ] Restore latest snapshot
-- [ ] Restore specific snapshot
-- [ ] Pre-backup hooks
-- [ ] Post-backup hooks
+- [x] Backup execution
+- [x] Restore latest snapshot
+- [x] Restore specific snapshot
+- [x] Pre-backup hooks
+- [x] Post-backup hooks
 
 ## Phase 4: Snapshot Management
 
