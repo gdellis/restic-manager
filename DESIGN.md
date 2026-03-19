@@ -11,46 +11,46 @@ flowchart TB
     subgraph CLI["CLI Layer"]
         commands[Commands<br/>run, restore, prune, etc.]
     end
-    
+
     subgraph Core["Core Layer"]
         config[Config Loading]
         secrets[Secrets Loading]
         scheduler[Scheduler]
         logging[Logging]
     end
-    
+
     subgraph Operations["Operations Layer"]
         backup[Backup]
         restore[Restore]
         snapshot[Snapshot]
         repository[Repository]
     end
-    
+
     subgraph Notifications["Notification Layer"]
         telegram[Telegram Bot]
     end
-    
+
     subgraph External["External"]
         restic[Restic CLI]
         tg_api[Telegram API]
     end
-    
+
     commands --> config
     commands --> secrets
     commands --> scheduler
     scheduler --> backup
     scheduler --> restore
     scheduler --> snapshot
-    
+
     backup --> restic
     restore --> restic
     snapshot --> restic
     repository --> restic
-    
+
     backup --> telegram
     restore --> telegram
     snapshot --> telegram
-    
+
     telegram --> tg_api
 ```
 
@@ -64,14 +64,14 @@ classDiagram
         +load() Config
         +validate() Result
     }
-    
+
     class Secrets {
         +values: HashMap~String, String~
         +telegram: Option~TelegramConfig~
         +load() Secrets
         +get(key: &str) Option~&str~
     }
-    
+
     class Job {
         +name: String
         +repository: String
@@ -82,28 +82,28 @@ classDiagram
         +pre_backup: Vec~Hook~
         +post_backup: Vec~Hook~
     }
-    
+
     class Backup {
         +run(job: &Job, secrets: &Secrets) Result~BackupResult~
         +execute_backup() Result
     }
-    
+
     class Restore {
         +restore_latest(job: &Job, secrets: &Secrets) Result
         +restore_snapshot(id: &str) Result
     }
-    
+
     class Scheduler {
         +add_job(job: Job)
         +start() Result
         +stop()
     }
-    
+
     class Notification {
         +send_failure(msg: &str) Result
         +send_success(msg: &str) Result
     }
-    
+
     Config --> Job
     Secrets --> Backup
     Secrets --> Restore
@@ -227,6 +227,7 @@ erDiagram
 ## Interface
 
 ### CLI Commands
+
 ```
 restic-manager run <job>         # Run backup job now
 restic-manager restore <job>    # Restore latest snapshot
@@ -244,6 +245,7 @@ restic-manager init <repo>      # Initialize repository
 ## Configuration
 
 ### Directory Structure
+
 ```
 ~/.config/restic-manager/
 ├── config.yaml    # Main configuration
@@ -251,6 +253,7 @@ restic-manager init <repo>      # Initialize repository
 ```
 
 ### config.yaml Schema
+
 ```yaml
 repositories:
   <name>:
@@ -283,6 +286,7 @@ jobs:
 ```
 
 ### secrets.yaml Schema
+
 ```yaml
 <key>: <value>
 telegram:
@@ -295,64 +299,74 @@ s3_secret_key: <secret>
 ## Module Design
 
 ### src/cli.rs
+
 - Clap-based CLI with subcommands
 - Shell completion support
 - Colored output for errors/warnings
 
 ### src/config.rs
+
 - Load and validate config.yaml
 - Load secrets.yaml (gitignored)
 - Resolve password_key references
 - Validate job configurations
 
 ### src/repository.rs
+
 - `init` - Initialize new repository
 - `check` - Verify repository integrity
 - `unlock` - Remove stale locks
 - `cat` - Read files from repo
 
 ### src/backup.rs
+
 - Execute `restic backup` with paths and exclusions
 - Run pre_backup commands
 - Handle stdout/stderr capture
 - Report exit code and output summary
 
 ### src/restore.rs
+
 - `restore_latest` - Restore most recent snapshot
 - `restore_snapshot` - Restore specific snapshot
 - Options: restore to original path, specific path, or stdin
 
 ### src/snapshot.rs
+
 - `list` - List snapshots with filters
 - `forget` - Remove snapshots by retention policy
 - `prune` - Run prune after forget
 
 ### src/scheduler.rs
+
 - Parse cron expressions using `cron` crate
 - Tokio-based async scheduler
 - Job queue with concurrency control
 - Graceful shutdown handling
 
 ### src/notification.rs
+
 - Telegram bot integration
 - Send messages on job completion/failure
 - Include job name, status, error details
 - Rate limiting to prevent spam
 
 ### src/errors.rs
+
 - Custom error types using thiserror
 - ConfigError, ResticError, NotificationError
 - Display impl for user-friendly messages
 
 ### src/logging.rs
+
 - Tracing-based structured logging
 - File rotation for logs
 - Log levels: error, warn, info, debug
 
-## Data Flow
+## Execution Flow
 
 1. **Startup**: Load config + secrets, validate, setup logging
-2. **Run Job**: 
+2. **Run Job**:
    - Load env vars from secrets
    - Run pre_backup commands
    - Execute restic backup
@@ -380,31 +394,37 @@ dirs = "6"
 ## Implementation Phases
 
 ### Phase 1: Foundation
+
 - Project setup with dependencies
 - Error types
 - Config and secrets loading
 - Basic CLI structure
 
 ### Phase 2: Repository Operations
+
 - Init, check, unlock commands
 - Test repository connectivity
 
 ### Phase 3: Backup/Restore
+
 - Backup execution
 - Restore functionality
 - Pre/post backup hooks
 
 ### Phase 4: Snapshot Management
+
 - List snapshots
 - Retention policies
 - Prune operations
 
 ### Phase 5: Scheduler
+
 - Cron parsing
 - Daemon mode
 - Job execution
 
 ### Phase 6: Notifications
+
 - Telegram integration
 - Failure/success messages
 

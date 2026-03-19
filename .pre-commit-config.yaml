@@ -1,0 +1,32 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+  - id: check-yaml
+  - id: end-of-file-fixer
+  - id: trailing-whitespace
+    args: [ --markdown-linebreak-ext=md ]
+
+- repo: local
+  hooks:
+  - id: rustfmt
+    name: rustfmt
+    entry: cargo fmt --check
+    language: system
+    pass_filenames: false
+    types: [rust]
+
+  - id: clippy
+    name: clippy
+    entry: cargo clippy --all-targets --all-features -- -D warnings
+    language: system
+    pass_filenames: false
+    types: [rust]
+
+- repo: local
+  hooks:
+  - id: markdownlint
+    name: markdownlint
+    entry: npx markdownlint-cli
+    language: node
+    types: [markdown]

@@ -1,6 +1,10 @@
 /target
 /Cargo.lock
 
+# Secrets
+secrets.yaml
+.env
+
 # IDE
 .idea/
 .vscode/

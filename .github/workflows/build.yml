@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - v*
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --all-targets
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir artifacts
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/release/restic-manager.exe artifacts/
+          else
+            cp target/release/restic-manager artifacts/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: restic-manager-${{ matrix.os }}
+          path: artifacts/
