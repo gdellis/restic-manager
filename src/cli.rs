@@ -3,8 +3,10 @@ use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::repository::Repository;
 use crate::restore::Restore;
+use crate::scheduler::Scheduler;
 use crate::snapshot::SnapshotManager;
 use clap::{Parser, Subcommand};
+use tokio::signal;
 
 #[derive(Parser)]
 #[command(name = "restic-manager")]
@@ -90,7 +92,16 @@ pub fn cli_run() -> Result<(), AppError> {
             Repository::unlock(&config, &name)?;
         }
         Commands::Daemon => {
-            println!("Starting scheduler daemon...");
+            let config = ResolvedConfig::load()?;
+            let mut scheduler = Scheduler::new(config)?;
+            let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
+
+            tokio::spawn(async move {
+                signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+                let _ = shutdown_tx.send(()).await;
+            });
+
+            scheduler.run(shutdown_rx)?;
         }
         Commands::Jobs => {
             let jobs = config.config.list_jobs();
