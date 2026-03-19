@@ -1,6 +1,8 @@
+use crate::backup::Backup;
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::repository::Repository;
+use crate::restore::Restore;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -47,16 +49,26 @@ pub fn cli_run() -> Result<(), AppError> {
 
     match cli.command {
         Commands::Run { name } => {
-            println!("Running backup job: {}", name);
+            let result = Backup::run(&config, &name)?;
+            println!(
+                "Backup completed: {} new, {} changed, {} unchanged files",
+                result.files_new, result.files_changed, result.files_unmodified
+            );
+            if let Some(snap) = result.snapshot_id {
+                println!("Snapshot ID: {}", snap);
+            }
         }
         Commands::Restore {
             name,
             snapshot,
             target,
         } => {
-            println!("Restoring job: {} to {}", name, target);
             if let Some(snap) = snapshot {
-                println!("Snapshot: {}", snap);
+                Restore::restore_snapshot(&config, &name, &snap, &target)?;
+                println!("Restored snapshot {} to {}", snap, target);
+            } else {
+                let snap = Restore::restore_latest(&config, &name, &target)?;
+                println!("Restored latest snapshot {} to {}", snap, target);
             }
         }
         Commands::Prune { name } => {
