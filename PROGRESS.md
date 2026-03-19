@@ -40,6 +40,6 @@
 
 ## Notes
 
-- Start date: 
+- Start date:
 - Target: Linux only initially
 - Config location: ~/.config/restic-manager/

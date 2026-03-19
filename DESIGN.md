@@ -11,46 +11,46 @@ flowchart TB
     subgraph CLI["CLI Layer"]
         commands[Commands<br/>run, restore, prune, etc.]
     end
-    
+
     subgraph Core["Core Layer"]
         config[Config Loading]
         secrets[Secrets Loading]
         scheduler[Scheduler]
         logging[Logging]
     end
-    
+
     subgraph Operations["Operations Layer"]
         backup[Backup]
         restore[Restore]
         snapshot[Snapshot]
         repository[Repository]
     end
-    
+
     subgraph Notifications["Notification Layer"]
         telegram[Telegram Bot]
     end
-    
+
     subgraph External["External"]
         restic[Restic CLI]
         tg_api[Telegram API]
     end
-    
+
     commands --> config
     commands --> secrets
     commands --> scheduler
     scheduler --> backup
     scheduler --> restore
     scheduler --> snapshot
-    
+
     backup --> restic
     restore --> restic
     snapshot --> restic
     repository --> restic
-    
+
     backup --> telegram
     restore --> telegram
     snapshot --> telegram
-    
+
     telegram --> tg_api
 ```
 
@@ -64,14 +64,14 @@ classDiagram
         +load() Config
         +validate() Result
     }
-    
+
     class Secrets {
         +values: HashMap~String, String~
         +telegram: Option~TelegramConfig~
         +load() Secrets
         +get(key: &str) Option~&str~
     }
-    
+
     class Job {
         +name: String
         +repository: String
@@ -82,28 +82,28 @@ classDiagram
         +pre_backup: Vec~Hook~
         +post_backup: Vec~Hook~
     }
-    
+
     class Backup {
         +run(job: &Job, secrets: &Secrets) Result~BackupResult~
         +execute_backup() Result
     }
-    
+
     class Restore {
         +restore_latest(job: &Job, secrets: &Secrets) Result
         +restore_snapshot(id: &str) Result
     }
-    
+
     class Scheduler {
         +add_job(job: Job)
         +start() Result
         +stop()
     }
-    
+
     class Notification {
         +send_failure(msg: &str) Result
         +send_success(msg: &str) Result
     }
-    
+
     Config --> Job
     Secrets --> Backup
     Secrets --> Restore
@@ -352,7 +352,7 @@ s3_secret_key: <secret>
 ## Data Flow
 
 1. **Startup**: Load config + secrets, validate, setup logging
-2. **Run Job**: 
+2. **Run Job**:
    - Load env vars from secrets
    - Run pre_backup commands
    - Execute restic backup
