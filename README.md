@@ -1,7 +1,8 @@
 # restic-manager
 
+<p align="center">
 <img src="resources/logo.jpg" width="200">
-
+</p>
 > CLI tool for managing restic backups with scheduling and notifications
 
 `restic-manager` simplifies backup management by providing a unified interface to configure jobs, schedule backups with cron, and receive notifications via Telegram.

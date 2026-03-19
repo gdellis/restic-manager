@@ -41,3 +41,6 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Lint Markdown
+        uses: actionshub/markdownlint@main

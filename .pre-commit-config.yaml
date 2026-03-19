@@ -22,3 +22,11 @@ repos:
     language: system
     pass_filenames: false
     types: [rust]
+
+- repo: local
+  hooks:
+  - id: markdownlint
+    name: markdownlint
+    entry: npx markdownlint-cli
+    language: node
+    types: [markdown]
