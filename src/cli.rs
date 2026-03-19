@@ -1,5 +1,6 @@
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
+use crate::repository::Repository;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -65,10 +66,10 @@ pub fn cli_run() -> Result<(), AppError> {
             println!("Listing snapshots for: {}", name);
         }
         Commands::Check { name } => {
-            println!("Checking repository for: {}", name);
+            Repository::check(&config, &name)?;
         }
         Commands::Unlock { name } => {
-            println!("Unlocking repository for: {}", name);
+            Repository::unlock(&config, &name)?;
         }
         Commands::Daemon => {
             println!("Starting scheduler daemon...");
@@ -88,7 +89,7 @@ pub fn cli_run() -> Result<(), AppError> {
             }
         }
         Commands::Init { name } => {
-            println!("Initializing repository: {}", name);
+            Repository::init(&config, &name)?;
         }
     }
 
