@@ -1,6 +1,6 @@
 # restic-manager
 
-![Logo](resources/logo.jpg)
+<img src="resources/logo.jpg" width="200">
 
 > CLI tool for managing restic backups with scheduling and notifications
 
