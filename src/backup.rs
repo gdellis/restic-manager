@@ -73,36 +73,104 @@ impl Backup {
                 .unwrap()
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
-        pb.set_message("Backing up...");
+        pb.set_message("Scanning files...");
 
-        let mut args = vec!["backup", "--json", "--repo", repo];
+        let mut args = vec![
+            "backup".to_string(),
+            "--json".to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+        ];
 
         for path in paths {
-            args.push(path.to_str().unwrap_or("."));
+            args.push(path.to_str().unwrap_or(".").to_string());
         }
 
         for pattern in exclude {
-            args.push("--exclude");
-            args.push(pattern);
+            args.push("--exclude".to_string());
+            args.push(pattern.clone());
         }
 
         debug!("Executing: restic {}", args.join(" "));
 
-        let output = Command::new("restic")
+        let mut child = Command::new("restic")
             .args(&args)
             .env("RESTIC_PASSWORD", password)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|_| ResticError::NotFound)?;
+
+        let stdout = child.stdout.take();
+        let mut stdout_reader;
+        let mut lines: Vec<String> = Vec::new();
+
+        if let Some(stdout) = stdout {
+            use std::io::{BufRead, BufReader};
+            stdout_reader = BufReader::new(stdout).lines();
+            for line in stdout_reader.by_ref().flatten() {
+                lines.push(line.clone());
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(msg_type) = json.get("message_type").and_then(|v| v.as_str()) {
+                        match msg_type {
+                            "status" => {
+                                let files_done =
+                                    json.get("files_done").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let total_files = json
+                                    .get("total_files")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let percent = json
+                                    .get("percent_done")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                if total_files > 0 {
+                                    pb.set_message(format!(
+                                        "{} / {} files ({:.0}%)",
+                                        files_done,
+                                        total_files,
+                                        percent * 100.0
+                                    ));
+                                }
+                            }
+                            "verbose_status" => {
+                                if let Some(item) = json.get("item").and_then(|v| v.as_str()) {
+                                    let action =
+                                        json.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                                    pb.set_message(format!("{}: {}", action, item));
+                                }
+                            }
+                            "summary" => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().map_err(|_| ResticError::NotFound)?;
 
         pb.finish_and_clear();
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
+        if !status.success() {
+            let stderr = child
+                .stderr
+                .take()
+                .map(|s| {
+                    use std::io::Read;
+                    let mut reader = std::io::BufReader::new(s);
+                    let mut text = String::new();
+                    reader.read_to_string(&mut text).ok();
+                    text
+                })
+                .unwrap_or_default();
+            return Err(ResticError::CommandFailed(stderr).into());
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = Self::parse_backup_output(stdout.trim())?;
+        let output = lines.join("\n");
+        let result = Self::parse_backup_output(&output)?;
 
         info!(
             snapshot = ?result.snapshot_id,
