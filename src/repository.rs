@@ -95,6 +95,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "test-password".to_string(),
+                log_cli_output: None,
             },
         );
 
@@ -144,6 +145,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "nonexistent-key".to_string(),
+                log_cli_output: None,
             },
         );
 

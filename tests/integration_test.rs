@@ -86,7 +86,7 @@ fn test_secrets_get_returns_none_for_missing_key() {
 }
 
 #[test]
-fn test_job_with_exclude_and_retention() {
+fn test_job_with_retention() {
     let yaml = r#"
 repositories:
   test:
@@ -97,15 +97,11 @@ jobs:
     repository: test
     paths:
       - /data
-    exclude:
-      - "*.tmp"
-      - ".cache/*"
     retention:
       keep_daily: 5
 "#;
     let config: Config = serde_yaml::from_str(yaml).unwrap();
     let job = config.jobs.get("test_job").unwrap();
-    assert_eq!(job.exclude, vec!["*.tmp", ".cache/*"]);
     assert!(job.retention.is_some());
 }
 

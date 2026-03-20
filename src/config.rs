@@ -66,6 +66,8 @@ impl Config {
 pub struct Repository {
     pub repo: String,
     pub password_key: String,
+    #[serde(default)]
+    pub log_cli_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +136,9 @@ pub struct Job {
     pub repository: String,
     pub paths: Vec<PathBuf>,
     #[serde(default)]
-    pub exclude: Vec<String>,
+    pub exclude_file: Option<String>,
+    #[serde(default)]
+    pub exclude_patterns: Option<Vec<String>>,
     #[serde(default)]
     pub schedule: Option<String>,
     #[serde(default)]

@@ -97,7 +97,7 @@ impl Scheduler {
                                     .as_ref()
                                     .map(|j| NotificationManager::new(&config, j.notifications.clone()));
 
-                                match Backup::run(&config, &name) {
+                                match Backup::run(&config, &name, false) {
                                     Ok(result) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {
@@ -159,6 +159,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "test-password".to_string(),
+                log_cli_output: None,
             },
         );
 
@@ -168,7 +169,8 @@ mod tests {
             Job {
                 repository: "test".to_string(),
                 paths: vec!["/tmp".into()],
-                exclude: vec![],
+                exclude_file: None,
+                exclude_patterns: None,
                 schedule: Some("0 2 * * *".to_string()),
                 retention: None,
                 notifications: Default::default(),
@@ -221,6 +223,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "test-password".to_string(),
+                log_cli_output: None,
             },
         );
 
@@ -230,7 +233,8 @@ mod tests {
             Job {
                 repository: "test".to_string(),
                 paths: vec!["/tmp".into()],
-                exclude: vec![],
+                exclude_file: None,
+                exclude_patterns: None,
                 schedule: None,
                 retention: None,
                 notifications: Default::default(),

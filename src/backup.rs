@@ -1,7 +1,49 @@
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
+use crate::exclude;
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+fn format_progress(
+    files_done: u64,
+    total_files: u64,
+    bytes_done: u64,
+    total_bytes: u64,
+    errors: u64,
+) -> String {
+    let files_str = format!("{} files", files_done);
+    let bytes_str = format_bytes(bytes_done);
+    let total_str = format!("{} files {}", total_files, format_bytes(total_bytes));
+    let error_str = if errors > 0 {
+        format!("{} errors", errors)
+    } else {
+        String::new()
+    };
+
+    if error_str.is_empty() {
+        format!("{}, total {}", files_str, total_str)
+    } else {
+        format!(
+            "{}, total {} ({}), {}",
+            files_str, total_str, error_str, bytes_str
+        )
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{} B", size as u64)
+    } else {
+        format!("{:.3} {}", size, UNITS[unit_idx])
+    }
+}
 
 #[derive(Debug)]
 pub struct BackupResult {
@@ -22,7 +64,11 @@ pub struct BackupResult {
 pub struct Backup;
 
 impl Backup {
-    pub fn run(config: &ResolvedConfig, job_name: &str) -> Result<BackupResult, AppError> {
+    pub fn run(
+        config: &ResolvedConfig,
+        job_name: &str,
+        dry_run: bool,
+    ) -> Result<BackupResult, AppError> {
         let job = config
             .config
             .get_job(job_name)
@@ -42,9 +88,35 @@ impl Backup {
 
         Self::execute_hooks(&job.pre_backup, "pre-backup")?;
 
-        let result = Self::execute_backup(&repo.repo, password, &job.paths, &job.exclude)?;
+        if dry_run {
+            info!(
+                job = job_name,
+                "DRY-RUN MODE: No data will be written to repository"
+            );
+        }
 
-        Self::execute_hooks(&job.post_backup, "post-backup")?;
+        let exclude_file =
+            exclude::resolve_exclude_file(job, job_name).map(|p| p.to_string_lossy().to_string());
+
+        let log_file = repo.log_cli_output.as_deref();
+
+        let result = Self::execute_backup(
+            &repo.repo,
+            password,
+            &job.paths,
+            exclude_file.as_deref(),
+            dry_run,
+            log_file,
+        )?;
+
+        if !dry_run {
+            Self::execute_hooks(&job.post_backup, "post-backup")?;
+        } else {
+            info!(
+                job = job_name,
+                "Dry-run completed, skipping post-backup hooks"
+            );
+        }
 
         info!(
             job = job_name,
@@ -61,33 +133,137 @@ impl Backup {
         repo: &str,
         password: &str,
         paths: &[std::path::PathBuf],
-        exclude: &[String],
+        exclude_file: Option<&str>,
+        dry_run: bool,
+        log_file: Option<&std::path::Path>,
     ) -> Result<BackupResult, AppError> {
-        let mut args = vec!["backup", "--json", "--repo", repo];
+        info!(paths = ?paths, "Starting backup to {}", repo);
+
+        let mut args = vec!["backup".to_string()];
+
+        if dry_run {
+            args.push("--dry-run".to_string());
+        }
+
+        args.push("--json".to_string());
+        args.push("--repo".to_string());
+        args.push(repo.to_string());
+
+        if let Some(file) = exclude_file {
+            args.push("--exclude-file".to_string());
+            args.push(file.to_string());
+        }
 
         for path in paths {
-            args.push("--files-from");
-            args.push(path.to_str().unwrap_or("."));
+            args.push(path.to_str().unwrap_or(".").to_string());
         }
 
-        for pattern in exclude {
-            args.push("--exclude");
-            args.push(pattern);
+        debug!("Executing: restic {}", args.join(" "));
+
+        if dry_run {
+            debug!("DRY-RUN flag confirmed in command args");
         }
 
-        let output = Command::new("restic")
-            .args(&args)
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(|_| ResticError::NotFound)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(&args).env("RESTIC_PASSWORD", password);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
+        if let Some(log_path) = log_file {
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            cmd.env("DEBUG_LOG", log_path);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::parse_backup_output(stdout.trim())
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|_| ResticError::NotFound)?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let mut lines: Vec<String> = Vec::new();
+
+        if let Some(stdout) = stdout {
+            use std::io::{BufRead, BufReader};
+            let mut stdout_reader = BufReader::new(stdout).lines();
+            for line in stdout_reader.by_ref().flatten() {
+                lines.push(line.clone());
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(msg_type) = json.get("message_type").and_then(|v| v.as_str()) {
+                        match msg_type {
+                            "status" => {
+                                let files_done =
+                                    json.get("files_done").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let total_files = json
+                                    .get("total_files")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let bytes_done =
+                                    json.get("bytes_done").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let total_bytes = json
+                                    .get("total_bytes")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let errors = json
+                                    .get("error_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                if total_files > 0 {
+                                    let progress = format_progress(
+                                        files_done,
+                                        total_files,
+                                        bytes_done,
+                                        total_bytes,
+                                        errors,
+                                    );
+                                    eprint!("\r{}", progress);
+                                }
+                            }
+                            "verbose_status" => {
+                                if let Some(item) = json.get("item").and_then(|v| v.as_str()) {
+                                    let action =
+                                        json.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                                    eprint!("\r{}: {}", action, item);
+                                }
+                            }
+                            "summary" => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().map_err(|_| ResticError::NotFound)?;
+
+        if !status.success() {
+            let stderr_text = stderr.and_then(|s| {
+                use std::io::Read;
+                let mut reader = std::io::BufReader::new(s);
+                let mut text = String::new();
+                if reader.read_to_string(&mut text).is_ok() && !text.is_empty() {
+                    Some(text)
+                } else {
+                    None
+                }
+            });
+            return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
+        }
+
+        let output = lines.join("\n");
+        let result = Self::parse_backup_output(&output)?;
+
+        info!(
+            snapshot = ?result.snapshot_id,
+            files_new = result.files_new,
+            files_changed = result.files_changed,
+            "Backup completed"
+        );
+
+        Ok(result)
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
@@ -160,6 +336,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "test-password".to_string(),
+                log_cli_output: None,
             },
         );
 
@@ -169,7 +346,9 @@ mod tests {
             Job {
                 repository: "test".to_string(),
                 paths: vec!["/tmp".into()],
-                exclude: vec![],
+
+                exclude_file: None,
+                exclude_patterns: None,
                 schedule: None,
                 retention: None,
                 notifications: Default::default(),
@@ -202,7 +381,7 @@ mod tests {
     #[test]
     fn test_missing_job() {
         let resolved = test_config();
-        let result = Backup::run(&resolved, "nonexistent");
+        let result = Backup::run(&resolved, "nonexistent", false);
         assert!(result.is_err());
     }
 
@@ -286,6 +465,7 @@ mod tests {
             RepoConfig {
                 repo: "/tmp/test-repo".to_string(),
                 password_key: "test-password".to_string(),
+                log_cli_output: None,
             },
         );
 
@@ -293,9 +473,11 @@ mod tests {
         jobs.insert(
             "test-job".to_string(),
             Job {
-                repository: "nonexistent".to_string(),
+                repository: "test".to_string(),
                 paths: vec!["/tmp".into()],
-                exclude: vec![],
+
+                exclude_file: None,
+                exclude_patterns: None,
                 schedule: None,
                 retention: None,
                 notifications: Default::default(),
@@ -312,7 +494,7 @@ mod tests {
             },
         };
 
-        let result = Backup::run(&config, "test-job");
+        let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
     }
 
@@ -325,7 +507,9 @@ mod tests {
             Job {
                 repository: "test".to_string(),
                 paths: vec!["/tmp".into()],
-                exclude: vec![],
+
+                exclude_file: None,
+                exclude_patterns: None,
                 schedule: None,
                 retention: None,
                 notifications: Default::default(),
@@ -342,7 +526,7 @@ mod tests {
             },
         };
 
-        let result = Backup::run(&config, "test-job");
+        let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
     }
 }

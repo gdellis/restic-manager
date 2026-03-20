@@ -19,7 +19,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     #[command(about = "Run a backup job")]
-    Run { name: String },
+    Run {
+        name: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     #[command(about = "Restore from a backup job")]
     Restore {
         name: String,
@@ -44,6 +48,8 @@ pub enum Commands {
     Repos,
     #[command(about = "Initialize a repository")]
     Init { name: String },
+    #[command(about = "Initialize or reset the exclude file with defaults")]
+    InitExclude,
 }
 
 pub fn cli_run() -> Result<(), AppError> {
@@ -51,8 +57,8 @@ pub fn cli_run() -> Result<(), AppError> {
     let config = ResolvedConfig::load()?;
 
     match cli.command {
-        Commands::Run { name } => {
-            let result = Backup::run(&config, &name)?;
+        Commands::Run { name, dry_run } => {
+            let result = Backup::run(&config, &name, dry_run)?;
             println!(
                 "Backup completed: {} new, {} changed, {} unchanged files",
                 result.files_new, result.files_changed, result.files_unmodified
@@ -119,6 +125,10 @@ pub fn cli_run() -> Result<(), AppError> {
         }
         Commands::Init { name } => {
             Repository::init(&config, &name)?;
+        }
+        Commands::InitExclude => {
+            let path = crate::exclude::ensure_default_exclude_file()?;
+            println!("Created default exclude file at: {}", path.display());
         }
     }
 
