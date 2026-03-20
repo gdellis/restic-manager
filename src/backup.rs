@@ -66,7 +66,6 @@ impl Backup {
         let mut args = vec!["backup", "--json", "--repo", repo];
 
         for path in paths {
-            args.push("--files-from");
             args.push(path.to_str().unwrap_or("."));
         }
 
