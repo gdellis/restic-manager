@@ -1,7 +1,8 @@
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub struct BackupResult {
@@ -63,7 +64,18 @@ impl Backup {
         paths: &[std::path::PathBuf],
         exclude: &[String],
     ) -> Result<BackupResult, AppError> {
-        let mut args = vec!["backup", "--json", "--repo", repo];
+        info!(paths = ?paths, exclude_count = exclude.len(), "Starting backup to {}", repo);
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        pb.set_message("Backing up...");
+
+        let mut args = vec!["backup", "--json", "--progress", "--repo", repo];
 
         for path in paths {
             args.push(path.to_str().unwrap_or("."));
@@ -74,11 +86,15 @@ impl Backup {
             args.push(pattern);
         }
 
+        debug!("Executing: restic {}", args.join(" "));
+
         let output = Command::new("restic")
             .args(&args)
             .env("RESTIC_PASSWORD", password)
             .output()
             .map_err(|_| ResticError::NotFound)?;
+
+        pb.finish_and_clear();
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -86,7 +102,16 @@ impl Backup {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::parse_backup_output(stdout.trim())
+        let result = Self::parse_backup_output(stdout.trim())?;
+
+        info!(
+            snapshot = ?result.snapshot_id,
+            files_new = result.files_new,
+            files_changed = result.files_changed,
+            "Backup completed"
+        );
+
+        Ok(result)
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
