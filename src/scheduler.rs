@@ -206,6 +206,12 @@ impl Scheduler {
                                         }
                                     }
                                     Err(join_err) => {
+                                        // join_result's Err only comes from the spawn_blocking
+                                        // closure above today (Notifications::new is sync and
+                                        // send_telegram only does a plain HTTP request, neither
+                                        // of which can panic), but this arm would also catch a
+                                        // panic anywhere else in this async block if one were
+                                        // ever introduced - that's intentional, not a bug.
                                         error!(job = %name, error = %join_err, "Backup task panicked");
                                         if let Some(ref n) = notifier {
                                             let _ = n

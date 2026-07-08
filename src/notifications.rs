@@ -24,7 +24,10 @@ impl Notifications {
         let telegram = config.secrets.telegram_config();
 
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             bot_token: telegram.and_then(|t| t.bot_token.clone()),
             chat_id: telegram.and_then(|t| t.chat_id.clone()),
             rate_limiter: Mutex::new(RateLimiter {
@@ -116,14 +119,20 @@ impl Notifications {
             ("parse_mode", "Markdown"),
         ];
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .form(&params)
             .send()
             .await
-            .map_err(NotificationError::RequestFailed)?
-            .error_for_status()
-            .map_err(|e| NotificationError::SendFailed(e.to_string()))?;
+            .map_err(NotificationError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(NotificationError::SendFailed(format!("{}: {}", status, body)).into());
+        }
+
         Ok(())
     }
 }
