@@ -370,10 +370,11 @@ Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::loa
 1. **Startup**: Load config + secrets, validate, setup logging
 2. **Run Job**:
    - Load env vars from secrets
-   - Run pre_backup commands
+   - Run pre_backup commands (skipped entirely in `--dry-run`, since they can have side effects like DB dumps or stopping services)
    - Execute restic backup
    - Run restic forget (retention)
    - Run restic prune (optional)
+   - Run post_backup commands (also skipped in `--dry-run`)
    - Send notification
    - Log results
 

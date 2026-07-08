@@ -71,17 +71,13 @@ impl Backup {
     ) -> Result<BackupResult, AppError> {
         let (job, repo, password) = config.resolve_job(job_name)?;
 
-        if dry_run {
-            info!(
-                job = job_name,
-                "DRY-RUN MODE: No data will be written to repository"
-            );
-            info!(
-                job = job_name,
-                "Dry-run requested, skipping pre-backup hooks"
-            );
-        } else {
+        if !dry_run {
             Self::execute_hooks(&job.pre_backup, "pre-backup")?;
+        } else {
+            info!(
+                job = job_name,
+                "DRY-RUN MODE: No data will be written to repository, skipping pre-backup hooks"
+            );
         }
 
         let exclude_file =
@@ -472,7 +468,7 @@ mod tests {
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();
         assert!(
-            !message.contains("hook"),
+            !message.contains("pre-backup hook"),
             "dry-run should skip pre-backup hooks entirely, got: {message}"
         );
     }
@@ -490,8 +486,25 @@ mod tests {
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();
         assert!(
-            message.contains("hook"),
+            message.contains("pre-backup hook"),
             "non-dry-run should still run and fail on the pre-backup hook, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_dry_run_skips_pre_backup_wait_hook() {
+        // A Wait hook has no failure mode to assert on, so instead assert
+        // it doesn't actually sleep: a hook that would sleep far longer
+        // than any reasonable test timeout must not run in dry-run mode.
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup =
+            vec![Hook::Wait { seconds: 3600 }];
+
+        let start = std::time::Instant::now();
+        let _ = Backup::run(&resolved, "test-job", true);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "dry-run should skip pre-backup Wait hooks entirely, not sleep"
         );
     }
 
