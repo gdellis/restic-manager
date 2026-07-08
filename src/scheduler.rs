@@ -24,6 +24,20 @@ struct JobEntry {
     schedule: Schedule,
 }
 
+/// Removes its job name from the in-flight set when dropped, including
+/// during a panic unwind, so a job can never get stuck permanently marked
+/// as running if something in its dispatch task panics.
+struct InFlightGuard {
+    in_flight: Arc<Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.lock().unwrap().remove(&self.name);
+    }
+}
+
 impl Scheduler {
     pub fn new(config: ResolvedConfig) -> Result<Self, AppError> {
         let mut jobs = HashMap::new();
@@ -70,11 +84,12 @@ impl Scheduler {
         true
     }
 
-    /// Atomically checks whether `job_name` is already running and, if not,
-    /// marks it as running. Returns `false` if it was already in-flight (in
-    /// which case the caller should skip dispatching this trigger). The
-    /// caller must remove `job_name` from `in_flight` once the job finishes,
-    /// regardless of outcome, so it can run again on a future trigger.
+    /// Checks whether `job_name` is already running and, if not, marks it as
+    /// running. Returns `false` if it was already in-flight (in which case
+    /// the caller should skip dispatching this trigger). This function does
+    /// no locking of its own: the caller must hold a lock on `in_flight` for
+    /// the duration of the call for the check-and-mark to be atomic. Release
+    /// is handled separately by `InFlightGuard`, not by this function.
     fn try_start(in_flight: &mut HashSet<String>, job_name: &str) -> bool {
         if in_flight.contains(job_name) {
             false
@@ -158,6 +173,11 @@ impl Scheduler {
                             let job = config.config.get_job(&name).cloned();
                             let in_flight = Arc::clone(&in_flight);
                             tokio::spawn(async move {
+                                let _guard = InFlightGuard {
+                                    in_flight,
+                                    name: name.clone(),
+                                };
+
                                 info!(job = %name, "Starting scheduled backup");
 
                                 let notifier = job
@@ -193,8 +213,6 @@ impl Scheduler {
                                         }
                                     }
                                 }
-
-                                in_flight.lock().unwrap().remove(&name);
                             });
                         }
                         None => break,
@@ -412,6 +430,41 @@ mod tests {
         assert!(Scheduler::try_start(&mut in_flight, "job"));
         in_flight.remove("job");
         assert!(Scheduler::try_start(&mut in_flight, "job"));
+    }
+
+    #[test]
+    fn test_in_flight_guard_removes_on_normal_drop() {
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        assert!(Scheduler::try_start(&mut in_flight.lock().unwrap(), "job"));
+        {
+            let _guard = InFlightGuard {
+                in_flight: Arc::clone(&in_flight),
+                name: "job".to_string(),
+            };
+        }
+        assert!(!in_flight.lock().unwrap().contains("job"));
+    }
+
+    #[test]
+    fn test_in_flight_guard_removes_on_panic_unwind() {
+        // This is the exact scenario flagged in review of PR #25: if
+        // something between dispatch and completion panics, the guard's
+        // Drop impl must still release the in-flight entry so the job
+        // isn't permanently stuck as "running".
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        assert!(Scheduler::try_start(&mut in_flight.lock().unwrap(), "job"));
+
+        let guard_in_flight = Arc::clone(&in_flight);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = InFlightGuard {
+                in_flight: guard_in_flight,
+                name: "job".to_string(),
+            };
+            panic!("simulated dispatch panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(!in_flight.lock().unwrap().contains("job"));
     }
 
     #[tokio::test]
