@@ -230,8 +230,8 @@ erDiagram
 
 ```
 restic-manager run <job>         # Run backup job now
-restic-manager restore <job>    # Restore latest snapshot
-restic-manager restore <job> --snapshot <id>
+restic-manager restore <job> --target <dir>    # Restore latest snapshot
+restic-manager restore <job> --snapshot <id> --target <dir>
 restic-manager prune <job>      # Run prune with retention
 restic-manager list <job>       # List snapshots for job
 restic-manager check <job>      # Check repository integrity

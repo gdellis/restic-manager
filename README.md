@@ -110,11 +110,12 @@ telegram:
 # Run a backup job
 restic-manager run documents
 
-# Restore latest backup
-restic-manager restore documents
+# Restore latest backup (--target is required to avoid accidentally
+# overwriting the current directory)
+restic-manager restore documents --target /path/to/restore
 
 # Restore specific snapshot
-restic-manager restore documents --snapshot abc123
+restic-manager restore documents --snapshot abc123 --target /path/to/restore
 
 # List snapshots
 restic-manager list documents
