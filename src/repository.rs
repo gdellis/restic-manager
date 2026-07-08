@@ -19,7 +19,7 @@ impl Repository {
             .args(["init", "--repo", &repo.repo])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if output.status.success() {
             println!("Repository '{}' initialized successfully", repo_name);
@@ -45,7 +45,7 @@ impl Repository {
             .args(["check", "--repo", &repo.repo])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if output.status.success() {
             println!("Repository '{}' check passed", repo_name);
@@ -70,7 +70,7 @@ impl Repository {
             .args(["unlock", "--repo", &repo.repo, "--remove-all"])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if output.status.success() {
             println!("Repository '{}' unlocked successfully", repo_name);

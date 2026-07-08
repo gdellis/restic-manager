@@ -41,6 +41,9 @@ pub enum ResticError {
     #[error("Restic not found in PATH")]
     NotFound,
 
+    #[error("Failed to run restic: {0}")]
+    Io(#[source] std::io::Error),
+
     #[error("Repository not initialized")]
     NotInitialized,
 
@@ -52,6 +55,21 @@ pub enum ResticError {
 
     #[error("Snapshot not found: {0}")]
     SnapshotNotFound(String),
+}
+
+impl ResticError {
+    /// Classifies an `io::Error` from spawning or waiting on a `restic`
+    /// child process: only a genuine "binary not found" error (ENOENT)
+    /// becomes `NotFound`, everything else (permission denied, resource
+    /// exhaustion, interrupted syscalls, etc.) is preserved as `Io` so the
+    /// real cause isn't hidden behind a misleading "not found" message.
+    pub fn from_io(err: std::io::Error) -> Self {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ResticError::NotFound
+        } else {
+            ResticError::Io(err)
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -88,3 +106,33 @@ pub enum AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn test_from_io_not_found_becomes_not_found_variant() {
+        let err = Error::new(ErrorKind::NotFound, "No such file or directory");
+        assert!(matches!(ResticError::from_io(err), ResticError::NotFound));
+    }
+
+    #[test]
+    fn test_from_io_permission_denied_preserves_error() {
+        let err = Error::new(ErrorKind::PermissionDenied, "Permission denied");
+        match ResticError::from_io(err) {
+            ResticError::Io(inner) => assert_eq!(inner.kind(), ErrorKind::PermissionDenied),
+            other => panic!("expected ResticError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_io_other_kind_preserves_error() {
+        let err = Error::new(ErrorKind::Interrupted, "signal received");
+        match ResticError::from_io(err) {
+            ResticError::Io(inner) => assert_eq!(inner.kind(), ErrorKind::Interrupted),
+            other => panic!("expected ResticError::Io, got {other:?}"),
+        }
+    }
+}

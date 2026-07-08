@@ -44,7 +44,7 @@ impl SnapshotManager {
             .args(["snapshots", "--json", "--repo", &repo.repo])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -144,7 +144,7 @@ impl SnapshotManager {
             .args(&args)
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -229,7 +229,7 @@ impl SnapshotManager {
             .args(["prune", "--repo", &repo.repo])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
