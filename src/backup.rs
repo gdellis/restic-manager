@@ -71,13 +71,17 @@ impl Backup {
     ) -> Result<BackupResult, AppError> {
         let (job, repo, password) = config.resolve_job(job_name)?;
 
-        Self::execute_hooks(&job.pre_backup, "pre-backup")?;
-
         if dry_run {
             info!(
                 job = job_name,
                 "DRY-RUN MODE: No data will be written to repository"
             );
+            info!(
+                job = job_name,
+                "Dry-run requested, skipping pre-backup hooks"
+            );
+        } else {
+            Self::execute_hooks(&job.pre_backup, "pre-backup")?;
         }
 
         let exclude_file =
@@ -447,6 +451,48 @@ mod tests {
         let resolved = test_config();
         let result = Backup::run(&resolved, "nonexistent", false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dry_run_skips_pre_backup_hooks() {
+        // A pre-backup hook pointing at a command that doesn't exist would
+        // normally abort the backup before it ever reaches restic (hook
+        // failures are fatal by default). If dry-run correctly skips
+        // pre-backup hooks, Backup::run should instead fail later, trying
+        // to invoke restic itself (which also isn't present in this test
+        // environment) - so the error must NOT mention the hook.
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup = vec![Hook::Command {
+            command: "definitely-not-a-real-command-98765".to_string(),
+            args: vec![],
+            continue_on_error: false,
+        }];
+
+        let result = Backup::run(&resolved, "test-job", true);
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(
+            !message.contains("hook"),
+            "dry-run should skip pre-backup hooks entirely, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_non_dry_run_runs_pre_backup_hooks_and_propagates_failure() {
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup = vec![Hook::Command {
+            command: "definitely-not-a-real-command-98765".to_string(),
+            args: vec![],
+            continue_on_error: false,
+        }];
+
+        let result = Backup::run(&resolved, "test-job", false);
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("hook"),
+            "non-dry-run should still run and fail on the pre-backup hook, got: {message}"
+        );
     }
 
     #[test]
