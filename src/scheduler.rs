@@ -99,10 +99,16 @@ impl Scheduler {
                         continue;
                     }
                     // with_second(0)/with_nanosecond(0) only return None when the
-                    // *argument* is out of range (sec >= 60, nanos >= 2_000_000_000),
-                    // never for the literal 0 passed here, so this branch is
-                    // unreachable in practice. Skip the tick rather than panic
-                    // the daemon if that ever changes.
+                    // *argument* is out of range (sec >= 60, nanos >= 2_000_000_000);
+                    // chrono guarantees Local::now() itself never produces a value
+                    // outside that range, so this branch is unreachable today. Skip
+                    // the tick rather than panic the daemon if that invariant ever
+                    // changes in a future chrono release.
+                    //
+                    // Caveat: dedup below is wall-clock based, so a backward NTP/DST
+                    // clock jump can re-trigger a job and a forward jump can skip one;
+                    // this uses Local::now() rather than a monotonic clock by design
+                    // for a personal backup tool's simplicity.
                     let Some(now) = Local::now()
                         .with_second(0)
                         .and_then(|t| t.with_nanosecond(0))
@@ -329,6 +335,7 @@ mod tests {
             &mut last_triggered,
             "job"
         ));
+        assert_eq!(last_triggered.get("job"), Some(&minute_one));
         assert!(Scheduler::mark_if_due(
             &schedule,
             minute_two,
