@@ -23,22 +23,7 @@ pub struct SnapshotManager;
 
 impl SnapshotManager {
     pub fn list(config: &ResolvedConfig, job_name: &str) -> Result<SnapshotList, AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (_job, repo, password) = config.resolve_job(job_name)?;
 
         let output = Command::new("restic")
             .args(["snapshots", "--json", "--repo", &repo.repo])
@@ -97,22 +82,7 @@ impl SnapshotManager {
         job_name: &str,
         dry_run: bool,
     ) -> Result<Vec<String>, AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (job, repo, password) = config.resolve_job(job_name)?;
 
         let retention = job.retention.as_ref().ok_or_else(|| {
             AppError::Other(format!(
@@ -206,22 +176,7 @@ impl SnapshotManager {
     }
 
     pub fn prune(config: &ResolvedConfig, job_name: &str) -> Result<(), AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (_job, repo, password) = config.resolve_job(job_name)?;
 
         info!(job = job_name, "Pruning repository");
 
