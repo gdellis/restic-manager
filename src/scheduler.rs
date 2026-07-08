@@ -194,22 +194,26 @@ impl Scheduler {
                                     Ok(Ok(result)) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_success(&name, result.snapshot_id.as_deref());
+                                            let _ = n
+                                                .notify_success(&name, result.snapshot_id.as_deref())
+                                                .await;
                                         }
                                     }
                                     Ok(Err(e)) => {
                                         error!(job = %name, error = %e, "Backup failed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_failure(&name, &e.to_string());
+                                            let _ = n.notify_failure(&name, &e.to_string()).await;
                                         }
                                     }
                                     Err(join_err) => {
                                         error!(job = %name, error = %join_err, "Backup task panicked");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_failure(
-                                                &name,
-                                                &format!("Backup task panicked: {}", join_err),
-                                            );
+                                            let _ = n
+                                                .notify_failure(
+                                                    &name,
+                                                    &format!("Backup task panicked: {}", join_err),
+                                                )
+                                                .await;
                                         }
                                     }
                                 }

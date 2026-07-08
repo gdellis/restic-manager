@@ -38,7 +38,7 @@ impl Notifications {
         self.bot_token.is_some() && self.chat_id.is_some()
     }
 
-    pub fn send_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
+    pub async fn send_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
         if !self.is_configured() {
             return Ok(());
         }
@@ -50,12 +50,16 @@ impl Notifications {
 
         let message = format!("❌ Backup Failed: {}\n\nError: {}", job_name, error);
 
-        self.send_telegram(&message)?;
+        self.send_telegram(&message).await?;
         info!(job = job_name, "Failure notification sent");
         Ok(())
     }
 
-    pub fn send_success(&self, job_name: &str, snapshot_id: Option<&str>) -> Result<(), AppError> {
+    pub async fn send_success(
+        &self,
+        job_name: &str,
+        snapshot_id: Option<&str>,
+    ) -> Result<(), AppError> {
         if !self.is_configured() {
             return Ok(());
         }
@@ -70,7 +74,7 @@ impl Notifications {
             format!("✅ Backup Success: {}", job_name)
         };
 
-        self.send_telegram(&message)?;
+        self.send_telegram(&message).await?;
         info!(job = job_name, "Success notification sent");
         Ok(())
     }
@@ -94,7 +98,7 @@ impl Notifications {
         true
     }
 
-    fn send_telegram(&self, message: &str) -> Result<(), AppError> {
+    async fn send_telegram(&self, message: &str) -> Result<(), AppError> {
         let bot_token = self
             .bot_token
             .as_ref()
@@ -112,18 +116,15 @@ impl Notifications {
             ("parse_mode", "Markdown"),
         ];
 
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async {
-            self.client
-                .post(&url)
-                .form(&params)
-                .send()
-                .await
-                .map_err(NotificationError::RequestFailed)?
-                .error_for_status()
-                .map_err(|e| NotificationError::SendFailed(e.to_string()))?;
-            Ok(())
-        })
+        self.client
+            .post(&url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(NotificationError::RequestFailed)?
+            .error_for_status()
+            .map_err(|e| NotificationError::SendFailed(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -140,20 +141,22 @@ impl NotificationManager {
         }
     }
 
-    pub fn notify_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
+    pub async fn notify_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
         if self.job_config.on_failure {
-            self.notifications.send_failure(job_name, error)?;
+            self.notifications.send_failure(job_name, error).await?;
         }
         Ok(())
     }
 
-    pub fn notify_success(
+    pub async fn notify_success(
         &self,
         job_name: &str,
         snapshot_id: Option<&str>,
     ) -> Result<(), AppError> {
         if self.job_config.on_success {
-            self.notifications.send_success(job_name, snapshot_id)?;
+            self.notifications
+                .send_success(job_name, snapshot_id)
+                .await?;
         }
         Ok(())
     }
@@ -211,68 +214,105 @@ mod tests {
         assert!(!notifications.is_configured());
     }
 
-    #[test]
-    fn test_send_failure_not_configured() {
+    #[tokio::test]
+    async fn test_send_failure_not_configured() {
         let config = test_config();
         let notifications = Notifications::new(&config);
-        let result = notifications.send_failure("test-job", "test error");
+        let result = notifications.send_failure("test-job", "test error").await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_send_success_not_configured() {
+    #[tokio::test]
+    async fn test_send_success_not_configured() {
         let config = test_config();
         let notifications = Notifications::new(&config);
-        let result = notifications.send_success("test-job", Some("snap123"));
+        let result = notifications
+            .send_success("test-job", Some("snap123"))
+            .await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_notification_manager_respects_on_failure_flag() {
+    #[tokio::test]
+    async fn test_notification_manager_respects_on_failure_flag() {
         let config = test_config();
         let job_config = NotificationConfig {
             on_failure: false,
             on_success: false,
         };
         let manager = NotificationManager::new(&config, job_config);
-        let result = manager.notify_failure("test-job", "error");
+        let result = manager.notify_failure("test-job", "error").await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_notification_manager_respects_on_success_flag() {
+    #[tokio::test]
+    async fn test_notification_manager_respects_on_success_flag() {
         let config = test_config();
         let job_config = NotificationConfig {
             on_failure: false,
             on_success: false,
         };
         let manager = NotificationManager::new(&config, job_config);
-        let result = manager.notify_success("test-job", Some("snap123"));
+        let result = manager.notify_success("test-job", Some("snap123")).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_notification_manager_notify_failure_flag_enabled() {
+    #[tokio::test]
+    async fn test_notification_manager_notify_failure_flag_enabled() {
         let config = test_config();
         let job_config = NotificationConfig {
             on_failure: true,
             on_success: false,
         };
         let manager = NotificationManager::new(&config, job_config);
-        let result = manager.notify_failure("test-job", "error");
+        let result = manager.notify_failure("test-job", "error").await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_notification_manager_notify_success_flag_enabled() {
+    #[tokio::test]
+    async fn test_notification_manager_notify_success_flag_enabled() {
         let config = test_config();
         let job_config = NotificationConfig {
             on_failure: false,
             on_success: true,
         };
         let manager = NotificationManager::new(&config, job_config);
-        let result = manager.notify_success("test-job", Some("snap123"));
+        let result = manager.notify_success("test-job", Some("snap123")).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_failure_configured_does_not_panic_from_spawned_task() {
+        // Regression test for #26: send_telegram used to spin up a nested
+        // tokio::runtime::Runtime and call block_on() on it, which panics
+        // when invoked from within an already-running runtime - exactly
+        // how the scheduler calls this, via tokio::spawn. Reproduce that
+        // calling shape here with telegram actually configured, so the
+        // call reaches send_telegram instead of short-circuiting on
+        // is_configured() == false like the other tests in this file.
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: Some("test-token".to_string()),
+                chat_id: Some("test-chat".to_string()),
+            }),
+        };
+
+        let handle = tokio::spawn(async move {
+            let notifications = Notifications::new(&config);
+            // The fake token means the actual HTTP call will fail or be
+            // rejected; we only care that awaiting it from inside this
+            // spawned task completes without panicking, not what the
+            // Telegram API actually returns.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                notifications.send_failure("test-job", "test error"),
+            )
+            .await;
+        });
+
+        assert!(handle.await.is_ok(), "notification task should not panic");
     }
 
     #[test]
