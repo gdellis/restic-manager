@@ -76,7 +76,7 @@ impl Backup {
         } else {
             info!(
                 job = job_name,
-                "DRY-RUN MODE: No data will be written to repository, skipping pre-backup hooks"
+                "Dry-run: no data will be written, skipping pre-backup hooks"
             );
         }
 
@@ -99,7 +99,7 @@ impl Backup {
         } else {
             info!(
                 job = job_name,
-                "Dry-run completed, skipping post-backup hooks"
+                "Dry-run: backup completed, skipping post-backup hooks"
             );
         }
 
@@ -467,8 +467,11 @@ mod tests {
         let result = Backup::run(&resolved, "test-job", true);
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();
+        // Broader than the positive-side assertion's "pre-backup hook" on
+        // purpose: any hook-related wording at all here would mean the
+        // hook ran, regardless of how execute_hooks' error text evolves.
         assert!(
-            !message.contains("pre-backup hook"),
+            !message.contains("hook"),
             "dry-run should skip pre-backup hooks entirely, got: {message}"
         );
     }
@@ -496,16 +499,22 @@ mod tests {
         // A Wait hook has no failure mode to assert on, so instead assert
         // it doesn't actually sleep: a hook that would sleep far longer
         // than any reasonable test timeout must not run in dry-run mode.
+        // 30s is generous enough to avoid flaking on a loaded CI runner,
+        // while still being 120x tighter than the 3600s being proved-skipped.
         let mut resolved = test_config();
         resolved.config.jobs.get_mut("test-job").unwrap().pre_backup =
             vec![Hook::Wait { seconds: 3600 }];
 
         let start = std::time::Instant::now();
-        let _ = Backup::run(&resolved, "test-job", true);
+        let result = Backup::run(&resolved, "test-job", true);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < std::time::Duration::from_secs(30),
             "dry-run should skip pre-backup Wait hooks entirely, not sleep"
         );
+        // Confirms the run actually progressed past the (skipped) hook to
+        // attempt a restic invocation, rather than short-circuiting on Ok
+        // before ever reaching that point.
+        assert!(result.is_err());
     }
 
     #[test]
