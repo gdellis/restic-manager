@@ -216,3 +216,92 @@ impl ResolvedConfig {
         Ok((repo, password))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::Secrets;
+
+    fn test_config() -> ResolvedConfig {
+        let mut repositories = HashMap::new();
+        repositories.insert(
+            "test-repo".to_string(),
+            Repository {
+                repo: "/tmp/test-repo".to_string(),
+                password_key: "test-password".to_string(),
+                log_cli_output: None,
+            },
+        );
+
+        let mut jobs = HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "test-repo".to_string(),
+                paths: vec!["/tmp".into()],
+                ..Default::default()
+            },
+        );
+
+        let mut secrets_values = HashMap::new();
+        secrets_values.insert("test-password".to_string(), "test-secret".to_string());
+
+        ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets {
+                values: secrets_values,
+                telegram: None,
+            },
+        }
+    }
+
+    #[test]
+    fn test_resolve_job_returns_job_repo_and_password() {
+        let config = test_config();
+        let (job, repo, password) = config.resolve_job("test-job").unwrap();
+        assert_eq!(job.repository, "test-repo");
+        assert_eq!(repo.repo, "/tmp/test-repo");
+        assert_eq!(password, "test-secret");
+    }
+
+    #[test]
+    fn test_resolve_job_errors_for_missing_job() {
+        let config = test_config();
+        assert!(config.resolve_job("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_resolve_job_errors_for_missing_repository() {
+        let mut config = test_config();
+        config.config.jobs.get_mut("test-job").unwrap().repository = "nonexistent-repo".to_string();
+        assert!(config.resolve_job("test-job").is_err());
+    }
+
+    #[test]
+    fn test_resolve_job_errors_for_missing_password() {
+        let mut config = test_config();
+        config.secrets.values.clear();
+        assert!(config.resolve_job("test-job").is_err());
+    }
+
+    #[test]
+    fn test_resolve_repo_returns_repo_and_password() {
+        let config = test_config();
+        let (repo, password) = config.resolve_repo("test-repo").unwrap();
+        assert_eq!(repo.repo, "/tmp/test-repo");
+        assert_eq!(password, "test-secret");
+    }
+
+    #[test]
+    fn test_resolve_repo_errors_for_missing_repository() {
+        let config = test_config();
+        assert!(config.resolve_repo("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_resolve_repo_errors_for_missing_password() {
+        let mut config = test_config();
+        config.secrets.values.clear();
+        assert!(config.resolve_repo("test-repo").is_err());
+    }
+}
