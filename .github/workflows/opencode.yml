@@ -1,0 +1,55 @@
+name: OpenCode Reusable Workflow
+
+on:
+  workflow_call:
+    secrets:
+      api_key:
+        description: 'AI Provider API key'
+        required: false
+
+    inputs:
+      model:
+        description: 'Ollama model to use'
+        required: false
+        type: string
+        default: 'ollama-cloud/qwen3-coder:480b'
+        
+      prompt:
+        description: 'Prompt for OpenCode'
+        required: false
+        type: string
+      include_pr_context:
+        description: 'Include PR info in context'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  opencode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: ${{ inputs.include_pr_context && 0 || 1 }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run OpenCode
+        uses: anomalyco/opencode/github@v1.14.17
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLLAMA_API_KEY: ${{ secrets.api_key }}
+          OLLAMA_CONTEXT_LENGTH: 64000
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ inputs.prompt }}
+          use_github_token: true
