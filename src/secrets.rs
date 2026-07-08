@@ -50,29 +50,57 @@ impl Secrets {
 
     /// A Unix permission `mode` (as returned by `PermissionsExt::mode()`) is
     /// insecure for a secrets file if it grants any access to group or
-    /// others - i.e. it's more permissive than `0600`.
+    /// others - i.e. it's more permissive than `0600`. This only inspects
+    /// POSIX mode bits; it doesn't see ACLs or other access-control
+    /// mechanisms that could grant broader access despite a strict mode.
     #[cfg(unix)]
     fn is_insecure_permissions(mode: u32) -> bool {
         mode & 0o077 != 0
     }
 
-    /// Warns (does not fail or modify anything) if the secrets file is
-    /// readable/writable by anyone other than its owner, since it holds
-    /// repository passwords and the Telegram bot token in plaintext.
+    /// A directory's mode is insecure for holding a secrets file if it's
+    /// writable by group or others - that would let another user on the
+    /// system replace, rename, or symlink-swap the secrets file itself,
+    /// regardless of how strict the file's own permissions are.
+    #[cfg(unix)]
+    fn is_insecure_directory_permissions(mode: u32) -> bool {
+        mode & 0o022 != 0
+    }
+
+    /// Warns (does not fail or modify anything) if the secrets file, or its
+    /// parent directory, is more permissive than it should be, since the
+    /// file holds repository passwords and the Telegram bot token in
+    /// plaintext.
     #[cfg(unix)]
     fn warn_if_insecure_permissions(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return;
-        };
-        let mode = metadata.permissions().mode() & 0o777;
-        if Self::is_insecure_permissions(mode) {
-            warn!(
-                path = %path.display(),
-                mode = format!("{:o}", mode),
-                "secrets file is readable/writable by group or others; it contains plaintext \
-                 repository passwords and should be chmod 600"
-            );
+
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mode = metadata.permissions().mode() & 0o777;
+            if Self::is_insecure_permissions(mode) {
+                warn!(
+                    path = %path.display(),
+                    mode = format!("{:o}", mode),
+                    "secrets file's POSIX permission bits are more permissive than 0600 \
+                     (readable/writable by group or others); it contains plaintext repository \
+                     passwords and should be chmod 600"
+                );
+            }
+        }
+
+        if let Some(parent) = path.parent() {
+            if let Ok(metadata) = std::fs::metadata(parent) {
+                let mode = metadata.permissions().mode() & 0o777;
+                if Self::is_insecure_directory_permissions(mode) {
+                    warn!(
+                        path = %parent.display(),
+                        mode = format!("{:o}", mode),
+                        "secrets file's parent directory is writable by group or others; \
+                         another user on this system could replace, rename, or symlink-swap \
+                         the secrets file - consider chmod 700"
+                    );
+                }
+            }
         }
     }
 
@@ -117,6 +145,28 @@ mod tests {
     #[test]
     fn test_is_insecure_permissions_0777_is_insecure() {
         assert!(Secrets::is_insecure_permissions(0o777));
+    }
+
+    #[test]
+    fn test_is_insecure_directory_permissions_0700_is_secure() {
+        assert!(!Secrets::is_insecure_directory_permissions(0o700));
+    }
+
+    #[test]
+    fn test_is_insecure_directory_permissions_group_readable_only_is_secure() {
+        // Group/other read+execute (0o755) doesn't grant write access, so
+        // it can't be used to replace the file - only the write bits matter.
+        assert!(!Secrets::is_insecure_directory_permissions(0o755));
+    }
+
+    #[test]
+    fn test_is_insecure_directory_permissions_group_writable_is_insecure() {
+        assert!(Secrets::is_insecure_directory_permissions(0o770));
+    }
+
+    #[test]
+    fn test_is_insecure_directory_permissions_world_writable_is_insecure() {
+        assert!(Secrets::is_insecure_directory_permissions(0o777));
     }
 
     #[test]
