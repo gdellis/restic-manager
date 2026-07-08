@@ -82,7 +82,7 @@ impl Restore {
             .args(["snapshots", "--json", "--latest", "1", "--repo", repo])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -110,7 +110,7 @@ impl Restore {
             .args(["restore", "--repo", repo, "--target", target, snapshot_id])
             .env("RESTIC_PASSWORD", password)
             .output()
-            .map_err(|_| ResticError::NotFound)?;
+            .map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

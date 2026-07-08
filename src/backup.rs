@@ -188,7 +188,7 @@ impl Backup {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|_| ResticError::NotFound)?;
+        let mut child = cmd.spawn().map_err(ResticError::from_io)?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -266,7 +266,7 @@ impl Backup {
             }
         }
 
-        let status = child.wait().map_err(|_| ResticError::NotFound)?;
+        let status = child.wait().map_err(ResticError::from_io)?;
 
         let stderr_text = stderr_handle.and_then(Self::join_stderr_thread);
 

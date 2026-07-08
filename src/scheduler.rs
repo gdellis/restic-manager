@@ -7,7 +7,9 @@ use chrono::Local;
 use chrono::Timelike;
 use cron::Schedule;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -68,6 +70,20 @@ impl Scheduler {
         true
     }
 
+    /// Atomically checks whether `job_name` is already running and, if not,
+    /// marks it as running. Returns `false` if it was already in-flight (in
+    /// which case the caller should skip dispatching this trigger). The
+    /// caller must remove `job_name` from `in_flight` once the job finishes,
+    /// regardless of outcome, so it can run again on a future trigger.
+    fn try_start(in_flight: &mut HashSet<String>, job_name: &str) -> bool {
+        if in_flight.contains(job_name) {
+            false
+        } else {
+            in_flight.insert(job_name.to_string());
+            true
+        }
+    }
+
     pub fn run(&mut self, shutdown_rx: mpsc::Receiver<()>) -> Result<(), AppError> {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(self.run_async(shutdown_rx))
@@ -89,6 +105,7 @@ impl Scheduler {
         ticker.tick().await;
         let mut shutdown_received = false;
         let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         info!(job_count = self.jobs.len(), "Scheduler started");
 
@@ -129,8 +146,17 @@ impl Scheduler {
                 job_name = rx.recv() => {
                     match job_name {
                         Some(name) => {
+                            {
+                                let mut running = in_flight.lock().unwrap();
+                                if !Self::try_start(&mut running, &name) {
+                                    warn!(job = %name, "Skipping trigger: job is already running");
+                                    continue;
+                                }
+                            }
+
                             let config = self.config.clone();
                             let job = config.config.get_job(&name).cloned();
+                            let in_flight = Arc::clone(&in_flight);
                             tokio::spawn(async move {
                                 info!(job = %name, "Starting scheduled backup");
 
@@ -167,6 +193,8 @@ impl Scheduler {
                                         }
                                     }
                                 }
+
+                                in_flight.lock().unwrap().remove(&name);
                             });
                         }
                         None => break,
@@ -362,6 +390,28 @@ mod tests {
             &mut last_triggered,
             "job-b"
         ));
+    }
+
+    #[test]
+    fn test_try_start_prevents_concurrent_same_job() {
+        let mut in_flight = HashSet::new();
+        assert!(Scheduler::try_start(&mut in_flight, "job"));
+        assert!(!Scheduler::try_start(&mut in_flight, "job"));
+    }
+
+    #[test]
+    fn test_try_start_allows_different_jobs_concurrently() {
+        let mut in_flight = HashSet::new();
+        assert!(Scheduler::try_start(&mut in_flight, "job-a"));
+        assert!(Scheduler::try_start(&mut in_flight, "job-b"));
+    }
+
+    #[test]
+    fn test_try_start_allows_rerun_after_release() {
+        let mut in_flight = HashSet::new();
+        assert!(Scheduler::try_start(&mut in_flight, "job"));
+        in_flight.remove("job");
+        assert!(Scheduler::try_start(&mut in_flight, "job"));
     }
 
     #[tokio::test]
