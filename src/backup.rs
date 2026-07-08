@@ -129,6 +129,17 @@ impl Backup {
         Ok(result)
     }
 
+    fn join_stderr_thread(handle: std::thread::JoinHandle<String>) -> Option<String> {
+        match handle.join() {
+            Ok(text) if !text.is_empty() => Some(text),
+            Ok(_) => None,
+            Err(_) => {
+                warn!("stderr reader thread panicked; stderr output unavailable");
+                None
+            }
+        }
+    }
+
     fn execute_backup(
         repo: &str,
         password: &str,
@@ -181,6 +192,24 @@ impl Backup {
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+
+        // Drain stderr on a dedicated thread concurrently with the stdout
+        // read loop below. If we read stdout to completion (or to the
+        // "summary" line) before touching stderr, restic can fill the
+        // ~64KB stderr pipe buffer and block on write() while we're
+        // blocked reading stdout -> deadlock.
+        let stderr_handle = stderr.map(|s| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut reader = std::io::BufReader::new(s);
+                let mut text = String::new();
+                if let Err(e) = reader.read_to_string(&mut text) {
+                    debug!("Failed to read restic stderr: {}", e);
+                }
+                text
+            })
+        });
+
         let mut lines: Vec<String> = Vec::new();
 
         if let Some(stdout) = stdout {
@@ -239,17 +268,13 @@ impl Backup {
 
         let status = child.wait().map_err(|_| ResticError::NotFound)?;
 
+        let stderr_text = stderr_handle.and_then(Self::join_stderr_thread);
+
+        if let Some(text) = stderr_text.as_deref() {
+            warn!(stderr = text, "restic wrote to stderr");
+        }
+
         if !status.success() {
-            let stderr_text = stderr.and_then(|s| {
-                use std::io::Read;
-                let mut reader = std::io::BufReader::new(s);
-                let mut text = String::new();
-                if reader.read_to_string(&mut text).is_ok() && !text.is_empty() {
-                    Some(text)
-                } else {
-                    None
-                }
-            });
             return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
         }
 
@@ -496,6 +521,27 @@ mod tests {
 
         let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_join_stderr_thread_returns_text() {
+        let handle = std::thread::spawn(|| "warning: permission denied\n".to_string());
+        assert_eq!(
+            Backup::join_stderr_thread(handle),
+            Some("warning: permission denied\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_join_stderr_thread_empty_returns_none() {
+        let handle = std::thread::spawn(String::new);
+        assert_eq!(Backup::join_stderr_thread(handle), None);
+    }
+
+    #[test]
+    fn test_join_stderr_thread_panic_returns_none() {
+        let handle = std::thread::spawn(|| -> String { panic!("simulated reader panic") });
+        assert_eq!(Backup::join_stderr_thread(handle), None);
     }
 
     #[test]

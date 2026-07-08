@@ -20,7 +20,22 @@ jobs:
       include_pr_context: true
       model: 'ollama-cloud/minimax-m3'
       prompt: |
-        Review this pull request:
+        Review this pull request.
+
+        Before writing your review, check this PR's existing comments and
+        review threads, including any prior comments from this same workflow.
+        If a point was already raised in an earlier review and the relevant
+        code hasn't materially changed since, do not repeat it in detail —
+        skip it, or reference it in one line without re-explaining it.
+        Only give full write-ups for issues that are new since the last
+        review, or where a prior point still applies to code that changed
+        again.
+
+        If this is a re-review (the PR already has a comment from this
+        workflow) and there's nothing new to flag, reply with a short
+        one-line comment like "No new issues since the last review." instead
+        of regenerating a full review.
+
         - Verify github actions in PR passed
         - Check for code quality issues
         - Look for potential bugs / security issues.
