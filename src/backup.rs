@@ -313,11 +313,12 @@ impl Backup {
         if text.len() <= Self::MAX_HOOK_STDERR_LEN {
             return text.to_string();
         }
-        let mut end = Self::MAX_HOOK_STDERR_LEN;
+        let suffix = "... (truncated)";
+        let mut end = Self::MAX_HOOK_STDERR_LEN.saturating_sub(suffix.len());
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}... (truncated)", &text[..end])
+        format!("{}{}", &text[..end], suffix)
     }
 
     fn execute_hooks(hooks: &[Hook], hook_type: &str) -> Result<(), AppError> {
@@ -381,7 +382,7 @@ mod tests {
     fn test_truncate_hook_stderr_over_limit_is_truncated() {
         let text = "a".repeat(Backup::MAX_HOOK_STDERR_LEN + 500);
         let result = Backup::truncate_hook_stderr(&text);
-        assert!(result.len() < text.len());
+        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN);
         assert!(result.ends_with("(truncated)"));
     }
 
@@ -389,7 +390,7 @@ mod tests {
     fn test_truncate_hook_stderr_respects_char_boundaries() {
         let text = "é".repeat(Backup::MAX_HOOK_STDERR_LEN);
         let result = Backup::truncate_hook_stderr(&text);
-        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN + "... (truncated)".len());
+        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN);
     }
 
     fn test_config() -> ResolvedConfig {
