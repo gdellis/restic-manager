@@ -2,6 +2,7 @@ use crate::backup::Backup;
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::notifications::NotificationManager;
+use chrono::DateTime;
 use chrono::Local;
 use chrono::Timelike;
 use cron::Schedule;
@@ -46,6 +47,14 @@ impl Scheduler {
             .map_err(|e| AppError::Other(format!("Invalid cron expression: {}", e)))
     }
 
+    fn should_trigger(
+        schedule: &Schedule,
+        now: DateTime<Local>,
+        last_triggered: Option<&DateTime<Local>>,
+    ) -> bool {
+        schedule.includes(now) && last_triggered != Some(&now)
+    }
+
     pub fn run(&mut self, shutdown_rx: mpsc::Receiver<()>) -> Result<(), AppError> {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(self.run_async(shutdown_rx))
@@ -62,6 +71,7 @@ impl Scheduler {
         let tick_interval = Duration::from_secs(60);
         let mut ticker = interval(tick_interval);
         let mut shutdown_received = false;
+        let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
 
         info!(job_count = self.jobs.len(), "Scheduler started");
 
@@ -71,15 +81,16 @@ impl Scheduler {
                     if shutdown_received {
                         continue;
                     }
-                    let now = Local::now();
+                    let now = Local::now()
+                        .with_second(0)
+                        .and_then(|t| t.with_nanosecond(0))
+                        .unwrap_or_else(Local::now);
                     for (job_name, entry) in &self.jobs {
-                        let next_run = entry.schedule.upcoming(Local).next();
-                        if let Some(t) = next_run {
-                            if t.hour() == now.hour() && t.minute() == now.minute() {
-                                let job_name = job_name.clone();
-                                if let Err(e) = tx.send(job_name).await {
-                                    warn!("Failed to queue job: {}", e);
-                                }
+                        if Self::should_trigger(&entry.schedule, now, last_triggered.get(job_name)) {
+                            last_triggered.insert(job_name.clone(), now);
+                            let job_name = job_name.clone();
+                            if let Err(e) = tx.send(job_name).await {
+                                warn!("Failed to queue job: {}", e);
                             }
                         }
                     }
@@ -97,17 +108,32 @@ impl Scheduler {
                                     .as_ref()
                                     .map(|j| NotificationManager::new(&config, j.notifications.clone()));
 
-                                match Backup::run(&config, &name, false) {
-                                    Ok(result) => {
+                                let blocking_name = name.clone();
+                                let join_result = tokio::task::spawn_blocking(move || {
+                                    Backup::run(&config, &blocking_name, false)
+                                })
+                                .await;
+
+                                match join_result {
+                                    Ok(Ok(result)) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {
                                             let _ = n.notify_success(&name, result.snapshot_id.as_deref());
                                         }
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         error!(job = %name, error = %e, "Backup failed");
                                         if let Some(ref n) = notifier {
                                             let _ = n.notify_failure(&name, &e.to_string());
+                                        }
+                                    }
+                                    Err(join_err) => {
+                                        error!(job = %name, error = %join_err, "Backup task panicked");
+                                        if let Some(ref n) = notifier {
+                                            let _ = n.notify_failure(
+                                                &name,
+                                                &format!("Backup task panicked: {}", join_err),
+                                            );
                                         }
                                     }
                                 }
@@ -151,6 +177,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, Job, Repository as RepoConfig};
     use crate::secrets::Secrets;
+    use chrono::TimeZone;
 
     fn test_config() -> ResolvedConfig {
         let mut repositories = std::collections::HashMap::new();
@@ -213,6 +240,71 @@ mod tests {
     fn test_parse_cron_invalid() {
         let result = Scheduler::parse_cron("invalid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_should_trigger_fires_on_matching_day() {
+        // The `cron` crate uses Quartz-style day-of-week numbering
+        // (1=Sunday .. 7=Saturday), so "1" here means Sundays, not
+        // Mondays. 2026-01-04 is a Sunday.
+        let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap(); // Sundays 02:00
+        let sunday_2am = Local.with_ymd_and_hms(2026, 1, 4, 2, 0, 0).unwrap();
+        assert!(Scheduler::should_trigger(&schedule, sunday_2am, None));
+    }
+
+    #[test]
+    fn test_should_trigger_skips_wrong_day() {
+        // This is the exact bug in #8: old code only compared hour/minute
+        // and would have fired here too. 2026-01-05 is a Monday, not a
+        // Sunday, so a Sundays-only schedule must not fire.
+        let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap();
+        let monday_2am = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
+        assert!(!Scheduler::should_trigger(&schedule, monday_2am, None));
+    }
+
+    #[test]
+    fn test_should_trigger_skips_duplicate_minute() {
+        let schedule = Scheduler::parse_cron("* * * * *").unwrap();
+        let now = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
+        assert!(Scheduler::should_trigger(&schedule, now, None));
+        assert!(!Scheduler::should_trigger(&schedule, now, Some(&now)));
+    }
+
+    #[test]
+    fn test_should_trigger_fires_again_next_minute() {
+        let schedule = Scheduler::parse_cron("* * * * *").unwrap();
+        let minute_one = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
+        let minute_two = Local.with_ymd_and_hms(2026, 1, 5, 2, 1, 0).unwrap();
+        assert!(Scheduler::should_trigger(
+            &schedule,
+            minute_two,
+            Some(&minute_one)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_blocking_panic_yields_join_error() {
+        let handle: tokio::task::JoinHandle<()> =
+            tokio::task::spawn_blocking(|| panic!("simulated backup panic"));
+        let result = handle.await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn test_backup_run_inside_spawn_blocking_returns_err_for_missing_job() {
+        let config = test_config();
+        let join_result =
+            tokio::task::spawn_blocking(move || Backup::run(&config, "nonexistent-job", false))
+                .await;
+        assert!(
+            join_result.is_ok(),
+            "spawn_blocking closure should not panic"
+        );
+        assert!(
+            join_result.unwrap().is_err(),
+            "unknown job should error out before touching restic"
+        );
     }
 
     #[test]
