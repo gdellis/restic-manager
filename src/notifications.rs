@@ -19,6 +19,9 @@ struct RateLimiter {
 
 const MIN_NOTIFICATION_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Telegram's hard limit on a sendMessage `text` field.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+
 impl Notifications {
     pub fn new(config: &ResolvedConfig) -> Self {
         let telegram = config.secrets.telegram_config();
@@ -101,6 +104,25 @@ impl Notifications {
         true
     }
 
+    /// Telegram's Markdown parser treats `_`, `*`, `` ` ``, `[` as special
+    /// characters; job names and (especially) restic error text are
+    /// arbitrary and not under our control, so unbalanced delimiters can
+    /// mangle the rendered message or make Telegram reject it outright. We
+    /// send plain text (no `parse_mode`) instead of trying to escape
+    /// arbitrary content. This also truncates to Telegram's 4096-char
+    /// message limit so an oversized message doesn't get rejected wholesale.
+    fn truncate_for_telegram(message: &str) -> String {
+        if message.len() <= TELEGRAM_MAX_MESSAGE_LEN {
+            return message.to_string();
+        }
+        let suffix = "\n… (truncated)";
+        let mut end = TELEGRAM_MAX_MESSAGE_LEN.saturating_sub(suffix.len());
+        while end > 0 && !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &message[..end], suffix)
+    }
+
     async fn send_telegram(&self, message: &str) -> Result<(), AppError> {
         let bot_token = self
             .bot_token
@@ -112,12 +134,9 @@ impl Notifications {
             .ok_or(NotificationError::NotConfigured)?;
 
         let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+        let message = Self::truncate_for_telegram(message);
 
-        let params = [
-            ("chat_id", chat_id.as_str()),
-            ("text", message),
-            ("parse_mode", "Markdown"),
-        ];
+        let params = [("chat_id", chat_id.as_str()), ("text", message.as_str())];
 
         let response = self
             .client
@@ -174,6 +193,35 @@ impl NotificationManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_for_telegram_short_message_unchanged() {
+        let message = "short message";
+        assert_eq!(Notifications::truncate_for_telegram(message), message);
+    }
+
+    #[test]
+    fn test_truncate_for_telegram_exact_limit_unchanged() {
+        let message = "a".repeat(TELEGRAM_MAX_MESSAGE_LEN);
+        assert_eq!(Notifications::truncate_for_telegram(&message), message);
+    }
+
+    #[test]
+    fn test_truncate_for_telegram_over_limit_is_truncated() {
+        let message = "a".repeat(TELEGRAM_MAX_MESSAGE_LEN + 500);
+        let result = Notifications::truncate_for_telegram(&message);
+        assert!(result.len() <= TELEGRAM_MAX_MESSAGE_LEN);
+        assert!(result.ends_with("(truncated)"));
+    }
+
+    #[test]
+    fn test_truncate_for_telegram_respects_char_boundaries() {
+        // Multi-byte UTF-8 characters right at the truncation boundary
+        // must not cause a panic from slicing mid-character.
+        let message = "é".repeat(TELEGRAM_MAX_MESSAGE_LEN);
+        let result = Notifications::truncate_for_telegram(&message);
+        assert!(result.len() <= TELEGRAM_MAX_MESSAGE_LEN);
+    }
 
     fn test_config() -> ResolvedConfig {
         use crate::config::{Config, Job, Repository as RepoConfig};
