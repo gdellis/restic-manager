@@ -29,7 +29,10 @@ pub enum Commands {
         name: String,
         #[arg(long)]
         snapshot: Option<String>,
-        #[arg(long, default_value = ".")]
+        #[arg(
+            long,
+            help = "Directory to restore into (required, to avoid accidentally overwriting the current directory)"
+        )]
         target: String,
     },
     #[command(about = "Prune old snapshots for a job")]
@@ -98,7 +101,6 @@ pub fn cli_run() -> Result<(), AppError> {
             Repository::unlock(&config, &name)?;
         }
         Commands::Daemon => {
-            let config = ResolvedConfig::load()?;
             let mut scheduler = Scheduler::new(config)?;
             let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
 
