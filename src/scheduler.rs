@@ -81,10 +81,13 @@ impl Scheduler {
                     if shutdown_received {
                         continue;
                     }
+                    // with_second(0)/with_nanosecond(0) only return None when the
+                    // *argument* is out of range (sec >= 60, nanos >= 2_000_000_000),
+                    // never for the literal 0 passed here, so this is always Some.
                     let now = Local::now()
                         .with_second(0)
                         .and_then(|t| t.with_nanosecond(0))
-                        .unwrap_or_else(Local::now);
+                        .expect("truncating seconds/nanoseconds to 0 is always valid");
                     for (job_name, entry) in &self.jobs {
                         if Self::should_trigger(&entry.schedule, now, last_triggered.get(job_name)) {
                             last_triggered.insert(job_name.clone(), now);

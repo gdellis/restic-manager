@@ -268,6 +268,10 @@ impl Backup {
 
         let stderr_text = stderr_handle.and_then(Self::join_stderr_thread);
 
+        if let Some(text) = stderr_text.as_deref() {
+            warn!(stderr = text, "restic wrote to stderr");
+        }
+
         if !status.success() {
             return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
         }
