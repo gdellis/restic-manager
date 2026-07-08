@@ -71,12 +71,12 @@ impl Backup {
     ) -> Result<BackupResult, AppError> {
         let (job, repo, password) = config.resolve_job(job_name)?;
 
-        Self::execute_hooks(&job.pre_backup, "pre-backup")?;
-
-        if dry_run {
+        if !dry_run {
+            Self::execute_hooks(&job.pre_backup, "pre-backup")?;
+        } else {
             info!(
                 job = job_name,
-                "DRY-RUN MODE: No data will be written to repository"
+                "Dry-run: no data will be written, skipping pre-backup hooks"
             );
         }
 
@@ -99,7 +99,7 @@ impl Backup {
         } else {
             info!(
                 job = job_name,
-                "Dry-run completed, skipping post-backup hooks"
+                "Dry-run: backup completed, skipping post-backup hooks"
             );
         }
 
@@ -446,6 +446,74 @@ mod tests {
     fn test_missing_job() {
         let resolved = test_config();
         let result = Backup::run(&resolved, "nonexistent", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dry_run_skips_pre_backup_hooks() {
+        // A pre-backup hook pointing at a command that doesn't exist would
+        // normally abort the backup before it ever reaches restic (hook
+        // failures are fatal by default). If dry-run correctly skips
+        // pre-backup hooks, Backup::run should instead fail later, trying
+        // to invoke restic itself (which also isn't present in this test
+        // environment) - so the error must NOT mention the hook.
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup = vec![Hook::Command {
+            command: "definitely-not-a-real-command-98765".to_string(),
+            args: vec![],
+            continue_on_error: false,
+        }];
+
+        let result = Backup::run(&resolved, "test-job", true);
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        // Broader than the positive-side assertion's "pre-backup hook" on
+        // purpose: any hook-related wording at all here would mean the
+        // hook ran, regardless of how execute_hooks' error text evolves.
+        assert!(
+            !message.contains("hook"),
+            "dry-run should skip pre-backup hooks entirely, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_non_dry_run_runs_pre_backup_hooks_and_propagates_failure() {
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup = vec![Hook::Command {
+            command: "definitely-not-a-real-command-98765".to_string(),
+            args: vec![],
+            continue_on_error: false,
+        }];
+
+        let result = Backup::run(&resolved, "test-job", false);
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("pre-backup hook"),
+            "non-dry-run should still run and fail on the pre-backup hook, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_dry_run_skips_pre_backup_wait_hook() {
+        // A Wait hook has no failure mode to assert on, so instead assert
+        // it doesn't actually sleep: a hook that would sleep far longer
+        // than any reasonable test timeout must not run in dry-run mode.
+        // 30s is generous enough to avoid flaking on a loaded CI runner,
+        // while still being 120x tighter than the 3600s being proved-skipped.
+        let mut resolved = test_config();
+        resolved.config.jobs.get_mut("test-job").unwrap().pre_backup =
+            vec![Hook::Wait { seconds: 3600 }];
+
+        let start = std::time::Instant::now();
+        let result = Backup::run(&resolved, "test-job", true);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "dry-run should skip pre-backup Wait hooks entirely, not sleep"
+        );
+        // Confirms the run actually progressed past the (skipped) hook to
+        // attempt a restic invocation, rather than short-circuiting on Ok
+        // before ever reaching that point.
         assert!(result.is_err());
     }
 

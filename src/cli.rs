@@ -21,7 +21,10 @@ pub enum Commands {
     #[command(about = "Run a backup job")]
     Run {
         name: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Preview the backup without writing data; also skips pre/post-backup hooks"
+        )]
         dry_run: bool,
     },
     #[command(about = "Restore from a backup job")]

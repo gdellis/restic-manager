@@ -296,7 +296,8 @@ s3_access_key: <key>
 s3_secret_key: <secret>
 ```
 
-Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::load`/`load_optional` warn (but don't fail) if the file is more permissive than that.
+Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::load`/`load_optional`
+warn (but don't fail) if the file is more permissive than that.
 
 ## Module Design
 
@@ -370,10 +371,11 @@ Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::loa
 1. **Startup**: Load config + secrets, validate, setup logging
 2. **Run Job**:
    - Load env vars from secrets
-   - Run pre_backup commands
+   - Run pre_backup commands (skipped in `--dry-run` - they can have side effects like DB dumps or service stops)
    - Execute restic backup
    - Run restic forget (retention)
    - Run restic prune (optional)
+   - Run post_backup commands (also skipped in `--dry-run`)
    - Send notification
    - Log results
 
