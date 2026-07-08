@@ -47,17 +47,25 @@ impl Scheduler {
             .map_err(|e| AppError::Other(format!("Invalid cron expression: {}", e)))
     }
 
-    /// Returns whether `schedule` is due at `now` and hasn't already been
-    /// dispatched for this exact (minute-truncated) instant. Contract: the
-    /// caller MUST record `now` as the new last-triggered value immediately
-    /// after a `true` result (before any `.await` point), otherwise a burst
-    /// of ticks landing in the same minute can double-dispatch the job.
-    fn is_freshly_due(
+    /// Atomically checks whether `schedule` is due at `now` and, if so,
+    /// records `job_name` as triggered for this exact (minute-truncated)
+    /// instant so a burst of ticks landing in the same minute can't
+    /// double-dispatch the job. The check and the record happen together
+    /// so there's no separate step for a caller to forget.
+    fn mark_if_due(
         schedule: &Schedule,
         now: DateTime<Local>,
-        last_triggered: Option<&DateTime<Local>>,
+        last_triggered: &mut HashMap<String, DateTime<Local>>,
+        job_name: &str,
     ) -> bool {
-        schedule.includes(now) && last_triggered != Some(&now)
+        if !schedule.includes(now) {
+            return false;
+        }
+        if last_triggered.get(job_name) == Some(&now) {
+            return false;
+        }
+        last_triggered.insert(job_name.to_string(), now);
+        true
     }
 
     pub fn run(&mut self, shutdown_rx: mpsc::Receiver<()>) -> Result<(), AppError> {
@@ -103,8 +111,7 @@ impl Scheduler {
                         continue;
                     };
                     for (job_name, entry) in &self.jobs {
-                        if Self::is_freshly_due(&entry.schedule, now, last_triggered.get(job_name)) {
-                            last_triggered.insert(job_name.clone(), now);
+                        if Self::mark_if_due(&entry.schedule, now, &mut last_triggered, job_name) {
                             let job_name = job_name.clone();
                             if let Err(e) = tx.send(job_name).await {
                                 warn!("Failed to queue job: {}", e);
@@ -260,42 +267,93 @@ mod tests {
     }
 
     #[test]
-    fn test_should_trigger_fires_on_matching_day() {
+    fn test_mark_if_due_fires_on_matching_day() {
         // The `cron` crate uses Quartz-style day-of-week numbering
         // (1=Sunday .. 7=Saturday), so "1" here means Sundays, not
         // Mondays. 2026-01-04 is a Sunday.
         let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap(); // Sundays 02:00
         let sunday_2am = Local.with_ymd_and_hms(2026, 1, 4, 2, 0, 0).unwrap();
-        assert!(Scheduler::is_freshly_due(&schedule, sunday_2am, None));
+        let mut last_triggered = HashMap::new();
+        assert!(Scheduler::mark_if_due(
+            &schedule,
+            sunday_2am,
+            &mut last_triggered,
+            "job"
+        ));
     }
 
     #[test]
-    fn test_should_trigger_skips_wrong_day() {
+    fn test_mark_if_due_skips_wrong_day() {
         // This is the exact bug in #8: old code only compared hour/minute
         // and would have fired here too. 2026-01-05 is a Monday, not a
         // Sunday, so a Sundays-only schedule must not fire.
         let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap();
         let monday_2am = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
-        assert!(!Scheduler::is_freshly_due(&schedule, monday_2am, None));
+        let mut last_triggered = HashMap::new();
+        assert!(!Scheduler::mark_if_due(
+            &schedule,
+            monday_2am,
+            &mut last_triggered,
+            "job"
+        ));
     }
 
     #[test]
-    fn test_should_trigger_skips_duplicate_minute() {
+    fn test_mark_if_due_skips_duplicate_minute() {
         let schedule = Scheduler::parse_cron("* * * * *").unwrap();
         let now = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
-        assert!(Scheduler::is_freshly_due(&schedule, now, None));
-        assert!(!Scheduler::is_freshly_due(&schedule, now, Some(&now)));
+        let mut last_triggered = HashMap::new();
+        assert!(Scheduler::mark_if_due(
+            &schedule,
+            now,
+            &mut last_triggered,
+            "job"
+        ));
+        assert!(!Scheduler::mark_if_due(
+            &schedule,
+            now,
+            &mut last_triggered,
+            "job"
+        ));
     }
 
     #[test]
-    fn test_should_trigger_fires_again_next_minute() {
+    fn test_mark_if_due_fires_again_next_minute() {
         let schedule = Scheduler::parse_cron("* * * * *").unwrap();
         let minute_one = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
         let minute_two = Local.with_ymd_and_hms(2026, 1, 5, 2, 1, 0).unwrap();
-        assert!(Scheduler::is_freshly_due(
+        let mut last_triggered = HashMap::new();
+        assert!(Scheduler::mark_if_due(
+            &schedule,
+            minute_one,
+            &mut last_triggered,
+            "job"
+        ));
+        assert!(Scheduler::mark_if_due(
             &schedule,
             minute_two,
-            Some(&minute_one)
+            &mut last_triggered,
+            "job"
+        ));
+    }
+
+    #[test]
+    fn test_mark_if_due_tracks_jobs_independently() {
+        let schedule = Scheduler::parse_cron("* * * * *").unwrap();
+        let now = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
+        let mut last_triggered = HashMap::new();
+        assert!(Scheduler::mark_if_due(
+            &schedule,
+            now,
+            &mut last_triggered,
+            "job-a"
+        ));
+        // A different job name must not be shadowed by job-a's entry.
+        assert!(Scheduler::mark_if_due(
+            &schedule,
+            now,
+            &mut last_triggered,
+            "job-b"
         ));
     }
 

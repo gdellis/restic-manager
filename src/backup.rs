@@ -203,7 +203,9 @@ impl Backup {
                 use std::io::Read;
                 let mut reader = std::io::BufReader::new(s);
                 let mut text = String::new();
-                let _ = reader.read_to_string(&mut text);
+                if let Err(e) = reader.read_to_string(&mut text) {
+                    debug!("Failed to read restic stderr: {}", e);
+                }
                 text
             })
         });
