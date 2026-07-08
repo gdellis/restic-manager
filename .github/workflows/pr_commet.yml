@@ -1,0 +1,28 @@
+name: OpenCode Comment Trigger
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: opencode-comment-${{ github.event.comment.id }}
+  cancel-in-progress: true
+
+jobs:
+  opencode:
+    if: |
+      contains(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, '/opencode')
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/opencode.yml
+    with:
+      model: 'ollama-cloud/minimax-m2.7'
+      include_pr_context: true
+    secrets:
+      api_key: ${{ secrets.OLLAMA_API_KEY }}

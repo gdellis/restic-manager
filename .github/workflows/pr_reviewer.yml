@@ -1,0 +1,34 @@
+name: OpenCode Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: ./.github/workflows/opencode.yml
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    with:
+      include_pr_context: true
+      model: 'ollama-cloud/minimax-m2.7'
+      prompt: |
+        Review this pull request:
+        - Verify github actions in PR passed
+        - Check for code quality issues
+        - Look for potential bugs / security issues.
+        - Suggest improvements
+        - Look for best practices like proper variable naming convention.
+        - Don't modify any files. Just provide review comments as detailed as possible.
+        - The review comments should highlight specific lines of code in the pull request.
+        - Add categories to each comment like [BUG], [IMPROVEMENT], [BEST PRACTICE], [SECURITY] and severity levels like [LOW], [MEDIUM], [HIGH]. Try to avoid unnecessary nitpicks unless they are important and hint towards a larger issue.
+        - If there are no issues, say "No issues found. Good job!"
+    secrets:
+      api_key: ${{ secrets.OLLAMA_API_KEY }}
