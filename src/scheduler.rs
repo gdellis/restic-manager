@@ -194,22 +194,32 @@ impl Scheduler {
                                     Ok(Ok(result)) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_success(&name, result.snapshot_id.as_deref());
+                                            let _ = n
+                                                .notify_success(&name, result.snapshot_id.as_deref())
+                                                .await;
                                         }
                                     }
                                     Ok(Err(e)) => {
                                         error!(job = %name, error = %e, "Backup failed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_failure(&name, &e.to_string());
+                                            let _ = n.notify_failure(&name, &e.to_string()).await;
                                         }
                                     }
                                     Err(join_err) => {
+                                        // join_result's Err only comes from the spawn_blocking
+                                        // closure above today (Notifications::new is sync and
+                                        // send_telegram only does a plain HTTP request, neither
+                                        // of which can panic), but this arm would also catch a
+                                        // panic anywhere else in this async block if one were
+                                        // ever introduced - that's intentional, not a bug.
                                         error!(job = %name, error = %join_err, "Backup task panicked");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_failure(
-                                                &name,
-                                                &format!("Backup task panicked: {}", join_err),
-                                            );
+                                            let _ = n
+                                                .notify_failure(
+                                                    &name,
+                                                    &format!("Backup task panicked: {}", join_err),
+                                                )
+                                                .await;
                                         }
                                     }
                                 }
