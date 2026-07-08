@@ -455,6 +455,11 @@ mod tests {
         assert!(Scheduler::try_start(&mut in_flight.lock().unwrap(), "job"));
 
         let guard_in_flight = Arc::clone(&in_flight);
+        // AssertUnwindSafe: Arc<Mutex<_>> isn't UnwindSafe by default since a
+        // panic could in theory leave the Mutex poisoned mid-mutation, but
+        // InFlightGuard's Drop only does a single `remove` call and doesn't
+        // observe any partially-mutated state, so asserting unwind safety
+        // here is sound.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = InFlightGuard {
                 in_flight: guard_in_flight,
