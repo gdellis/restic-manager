@@ -230,8 +230,8 @@ erDiagram
 
 ```
 restic-manager run <job>         # Run backup job now
-restic-manager restore <job>    # Restore latest snapshot
-restic-manager restore <job> --snapshot <id>
+restic-manager restore <job> --target <dir>    # Restore latest snapshot
+restic-manager restore <job> --snapshot <id> --target <dir>
 restic-manager prune <job>      # Run prune with retention
 restic-manager list <job>       # List snapshots for job
 restic-manager check <job>      # Check repository integrity
@@ -295,6 +295,8 @@ telegram:
 s3_access_key: <key>
 s3_secret_key: <secret>
 ```
+
+Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::load`/`load_optional` warn (but don't fail) if the file is more permissive than that.
 
 ## Module Design
 

@@ -6,14 +6,7 @@ pub struct Repository;
 
 impl Repository {
     pub fn init(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
-        let repo = config
-            .config
-            .get_repository(repo_name)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", repo_name)))?;
-
-        let password = config.get_repo_password(repo_name).ok_or_else(|| {
-            AppError::Other(format!("No password found for repository '{}'", repo_name))
-        })?;
+        let (repo, password) = config.resolve_repo(repo_name)?;
 
         let output = Command::new("restic")
             .args(["init", "--repo", &repo.repo])
@@ -32,14 +25,7 @@ impl Repository {
     }
 
     pub fn check(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
-        let repo = config
-            .config
-            .get_repository(repo_name)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", repo_name)))?;
-
-        let password = config.get_repo_password(repo_name).ok_or_else(|| {
-            AppError::Other(format!("No password found for repository '{}'", repo_name))
-        })?;
+        let (repo, password) = config.resolve_repo(repo_name)?;
 
         let output = Command::new("restic")
             .args(["check", "--repo", &repo.repo])
@@ -57,14 +43,7 @@ impl Repository {
     }
 
     pub fn unlock(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
-        let repo = config
-            .config
-            .get_repository(repo_name)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", repo_name)))?;
-
-        let password = config.get_repo_password(repo_name).ok_or_else(|| {
-            AppError::Other(format!("No password found for repository '{}'", repo_name))
-        })?;
+        let (repo, password) = config.resolve_repo(repo_name)?;
 
         let output = Command::new("restic")
             .args(["unlock", "--repo", &repo.repo, "--remove-all"])

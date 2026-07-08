@@ -104,17 +104,20 @@ telegram:
   chat_id: your-chat-id
 ```
 
+This file holds plaintext repository passwords and your Telegram bot token, so restrict it to your own user (`chmod 600 ~/.config/restic-manager/secrets.yaml`). `restic-manager` warns at startup if it detects the file is readable or writable by group or others.
+
 ### Usage
 
 ```bash
 # Run a backup job
 restic-manager run documents
 
-# Restore latest backup
-restic-manager restore documents
+# Restore latest backup (--target is required to avoid accidentally
+# overwriting the current directory)
+restic-manager restore documents --target /path/to/restore
 
 # Restore specific snapshot
-restic-manager restore documents --snapshot abc123
+restic-manager restore documents --snapshot abc123 --target /path/to/restore
 
 # List snapshots
 restic-manager list documents

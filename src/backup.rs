@@ -69,22 +69,7 @@ impl Backup {
         job_name: &str,
         dry_run: bool,
     ) -> Result<BackupResult, AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (job, repo, password) = config.resolve_job(job_name)?;
 
         Self::execute_hooks(&job.pre_backup, "pre-backup")?;
 
@@ -246,14 +231,14 @@ impl Backup {
                                         total_bytes,
                                         errors,
                                     );
-                                    eprint!("\r{}", progress);
+                                    eprint!("\r\x1B[2K{}", progress);
                                 }
                             }
                             "verbose_status" => {
                                 if let Some(item) = json.get("item").and_then(|v| v.as_str()) {
                                     let action =
                                         json.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                                    eprint!("\r{}: {}", action, item);
+                                    eprint!("\r\x1B[2K{}: {}", action, item);
                                 }
                             }
                             "summary" => {
@@ -319,23 +304,56 @@ impl Backup {
         })
     }
 
+    /// Caps embedded hook stderr so a chatty hook (e.g. a DB dump command
+    /// that logs its whole progress) can't produce an unbounded error
+    /// message that then propagates through logs and Telegram.
+    const MAX_HOOK_STDERR_LEN: usize = 4096;
+
+    fn truncate_hook_stderr(text: &str) -> String {
+        if text.len() <= Self::MAX_HOOK_STDERR_LEN {
+            return text.to_string();
+        }
+        let suffix = "... (truncated)";
+        let mut end = Self::MAX_HOOK_STDERR_LEN.saturating_sub(suffix.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &text[..end], suffix)
+    }
+
     fn execute_hooks(hooks: &[Hook], hook_type: &str) -> Result<(), AppError> {
         for hook in hooks {
             match hook {
-                Hook::Command { command, args } => {
+                Hook::Command {
+                    command,
+                    args,
+                    continue_on_error,
+                } => {
                     info!(hook = hook_type, cmd = command, "Executing hook command");
                     let output = Command::new(command).args(args).output().map_err(|e| {
                         AppError::Other(format!("Failed to execute {} hook: {}", hook_type, e))
                     })?;
 
                     if !output.status.success() {
-                        let _stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!(
-                            hook = hook_type,
-                            cmd = command,
-                            exit_code = output.status.code(),
-                            "Hook command failed"
-                        );
+                        let stderr =
+                            Self::truncate_hook_stderr(&String::from_utf8_lossy(&output.stderr));
+                        if *continue_on_error {
+                            warn!(
+                                hook = hook_type,
+                                cmd = command,
+                                exit_code = output.status.code(),
+                                stderr = %stderr,
+                                "Hook command failed, continuing (continue_on_error=true)"
+                            );
+                        } else {
+                            return Err(AppError::Other(format!(
+                                "{} hook '{}' failed (exit {:?}): {}",
+                                hook_type,
+                                command,
+                                output.status.code(),
+                                stderr
+                            )));
+                        }
                     }
                 }
                 Hook::Wait { seconds } => {
@@ -353,6 +371,27 @@ mod tests {
     use super::*;
     use crate::config::{Config, Job, Repository as RepoConfig};
     use crate::secrets::Secrets;
+
+    #[test]
+    fn test_truncate_hook_stderr_short_text_unchanged() {
+        let text = "a normal error message";
+        assert_eq!(Backup::truncate_hook_stderr(text), text);
+    }
+
+    #[test]
+    fn test_truncate_hook_stderr_over_limit_is_truncated() {
+        let text = "a".repeat(Backup::MAX_HOOK_STDERR_LEN + 500);
+        let result = Backup::truncate_hook_stderr(&text);
+        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN);
+        assert!(result.ends_with("(truncated)"));
+    }
+
+    #[test]
+    fn test_truncate_hook_stderr_respects_char_boundaries() {
+        let text = "é".repeat(Backup::MAX_HOOK_STDERR_LEN);
+        let result = Backup::truncate_hook_stderr(&text);
+        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN);
+    }
 
     fn test_config() -> ResolvedConfig {
         let mut repositories = std::collections::HashMap::new();
@@ -424,6 +463,7 @@ mod tests {
         let hooks = vec![Hook::Command {
             command: "nonexistent-command-12345".to_string(),
             args: vec![],
+            continue_on_error: false,
         }];
         let result = Backup::execute_hooks(&hooks, "test");
         assert!(result.is_err());
@@ -472,11 +512,38 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(windows)]
+    fn failing_command() -> (String, Vec<String>) {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), "exit 1".to_string()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn failing_command() -> (String, Vec<String>) {
+        ("false".to_string(), vec![])
+    }
+
     #[test]
-    fn test_hooks_command_failure_silent() {
+    fn test_hooks_command_failure_aborts_by_default() {
+        let (command, args) = failing_command();
         let hooks = vec![Hook::Command {
-            command: "echo".to_string(),
-            args: vec!["fail".to_string()],
+            command,
+            args,
+            continue_on_error: false,
+        }];
+        let result = Backup::execute_hooks(&hooks, "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hooks_command_failure_continues_when_opted_in() {
+        let (command, args) = failing_command();
+        let hooks = vec![Hook::Command {
+            command,
+            args,
+            continue_on_error: true,
         }];
         let result = Backup::execute_hooks(&hooks, "test");
         assert!(result.is_ok());

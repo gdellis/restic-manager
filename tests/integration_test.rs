@@ -115,9 +115,33 @@ args:
 "#;
     let hook: Hook = serde_yaml::from_str(yaml).unwrap();
     match hook {
-        Hook::Command { command, args } => {
+        Hook::Command {
+            command,
+            args,
+            continue_on_error,
+        } => {
             assert_eq!(command, "/usr/local/bin/backup-hook");
             assert_eq!(args, vec!["--notify"]);
+            assert!(!continue_on_error);
+        }
+        _ => panic!("Expected Command hook"),
+    }
+}
+
+#[test]
+fn test_hook_command_continue_on_error_deserialize() {
+    let yaml = r#"
+type: Command
+command: /usr/local/bin/notify-hook
+args: []
+continue_on_error: true
+"#;
+    let hook: Hook = serde_yaml::from_str(yaml).unwrap();
+    match hook {
+        Hook::Command {
+            continue_on_error, ..
+        } => {
+            assert!(continue_on_error);
         }
         _ => panic!("Expected Command hook"),
     }

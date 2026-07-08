@@ -11,22 +11,7 @@ impl Restore {
         job_name: &str,
         target: &str,
     ) -> Result<String, AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (_job, repo, password) = config.resolve_job(job_name)?;
 
         let snapshot_id = Self::find_latest_snapshot(&repo.repo, password)?;
 
@@ -48,22 +33,7 @@ impl Restore {
         snapshot_id: &str,
         target: &str,
     ) -> Result<(), AppError> {
-        let job = config
-            .config
-            .get_job(job_name)
-            .ok_or_else(|| AppError::Other(format!("Job '{}' not found", job_name)))?;
-
-        let repo = config
-            .config
-            .get_repository(&job.repository)
-            .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", job.repository)))?;
-
-        let password = config.get_repo_password(&job.repository).ok_or_else(|| {
-            AppError::Other(format!(
-                "No password found for repository '{}'",
-                job.repository
-            ))
-        })?;
+        let (_job, repo, password) = config.resolve_job(job_name)?;
 
         Self::restore_snapshot_id(&repo.repo, password, snapshot_id, target)?;
 
@@ -90,7 +60,11 @@ impl Restore {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let snapshots: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())
+        Self::parse_latest_snapshot_id(&stdout)
+    }
+
+    fn parse_latest_snapshot_id(output: &str) -> Result<String, AppError> {
+        let snapshots: Vec<serde_json::Value> = serde_json::from_str(output.trim())
             .map_err(|e| AppError::Other(format!("Failed to parse snapshots JSON: {}", e)))?;
 
         snapshots
@@ -182,14 +156,27 @@ mod tests {
     }
 
     #[test]
-    fn test_find_latest_snapshot_empty() {
-        let result = Restore::find_latest_snapshot("/tmp/repo", "password");
+    fn test_parse_latest_snapshot_id_empty() {
+        let result = Restore::parse_latest_snapshot_id("");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_find_latest_snapshot_invalid_json() {
-        let result = Restore::find_latest_snapshot("/tmp/repo", "password");
+    fn test_parse_latest_snapshot_id_invalid_json() {
+        let result = Restore::parse_latest_snapshot_id("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_latest_snapshot_id_no_snapshots() {
+        let result = Restore::parse_latest_snapshot_id("[]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_latest_snapshot_id_valid() {
+        let json = r#"[{"id":"abc123def456","short_id":"abc123d"}]"#;
+        let result = Restore::parse_latest_snapshot_id(json);
+        assert_eq!(result.unwrap(), "abc123def456");
     }
 }
