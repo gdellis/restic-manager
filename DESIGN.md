@@ -296,6 +296,8 @@ s3_access_key: <key>
 s3_secret_key: <secret>
 ```
 
+Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::load`/`load_optional` warn (but don't fail) if the file is more permissive than that.
+
 ## Module Design
 
 ### src/cli.rs
