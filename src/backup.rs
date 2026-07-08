@@ -304,6 +304,22 @@ impl Backup {
         })
     }
 
+    /// Caps embedded hook stderr so a chatty hook (e.g. a DB dump command
+    /// that logs its whole progress) can't produce an unbounded error
+    /// message that then propagates through logs and Telegram.
+    const MAX_HOOK_STDERR_LEN: usize = 4096;
+
+    fn truncate_hook_stderr(text: &str) -> String {
+        if text.len() <= Self::MAX_HOOK_STDERR_LEN {
+            return text.to_string();
+        }
+        let mut end = Self::MAX_HOOK_STDERR_LEN;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... (truncated)", &text[..end])
+    }
+
     fn execute_hooks(hooks: &[Hook], hook_type: &str) -> Result<(), AppError> {
         for hook in hooks {
             match hook {
@@ -318,12 +334,14 @@ impl Backup {
                     })?;
 
                     if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let stderr =
+                            Self::truncate_hook_stderr(&String::from_utf8_lossy(&output.stderr));
                         if *continue_on_error {
                             warn!(
                                 hook = hook_type,
                                 cmd = command,
                                 exit_code = output.status.code(),
+                                stderr = %stderr,
                                 "Hook command failed, continuing (continue_on_error=true)"
                             );
                         } else {
@@ -352,6 +370,27 @@ mod tests {
     use super::*;
     use crate::config::{Config, Job, Repository as RepoConfig};
     use crate::secrets::Secrets;
+
+    #[test]
+    fn test_truncate_hook_stderr_short_text_unchanged() {
+        let text = "a normal error message";
+        assert_eq!(Backup::truncate_hook_stderr(text), text);
+    }
+
+    #[test]
+    fn test_truncate_hook_stderr_over_limit_is_truncated() {
+        let text = "a".repeat(Backup::MAX_HOOK_STDERR_LEN + 500);
+        let result = Backup::truncate_hook_stderr(&text);
+        assert!(result.len() < text.len());
+        assert!(result.ends_with("(truncated)"));
+    }
+
+    #[test]
+    fn test_truncate_hook_stderr_respects_char_boundaries() {
+        let text = "é".repeat(Backup::MAX_HOOK_STDERR_LEN);
+        let result = Backup::truncate_hook_stderr(&text);
+        assert!(result.len() <= Backup::MAX_HOOK_STDERR_LEN + "... (truncated)".len());
+    }
 
     fn test_config() -> ResolvedConfig {
         let mut repositories = std::collections::HashMap::new();
