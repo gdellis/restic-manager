@@ -47,7 +47,12 @@ impl Scheduler {
             .map_err(|e| AppError::Other(format!("Invalid cron expression: {}", e)))
     }
 
-    fn should_trigger(
+    /// Returns whether `schedule` is due at `now` and hasn't already been
+    /// dispatched for this exact (minute-truncated) instant. Contract: the
+    /// caller MUST record `now` as the new last-triggered value immediately
+    /// after a `true` result (before any `.await` point), otherwise a burst
+    /// of ticks landing in the same minute can double-dispatch the job.
+    fn is_freshly_due(
         schedule: &Schedule,
         now: DateTime<Local>,
         last_triggered: Option<&DateTime<Local>>,
@@ -70,6 +75,10 @@ impl Scheduler {
 
         let tick_interval = Duration::from_secs(60);
         let mut ticker = interval(tick_interval);
+        // tokio::time::interval fires its first tick immediately rather than
+        // after one full interval; consume it here so a job scheduled for
+        // "every minute" doesn't get a spurious extra run right at startup.
+        ticker.tick().await;
         let mut shutdown_received = false;
         let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
 
@@ -83,13 +92,18 @@ impl Scheduler {
                     }
                     // with_second(0)/with_nanosecond(0) only return None when the
                     // *argument* is out of range (sec >= 60, nanos >= 2_000_000_000),
-                    // never for the literal 0 passed here, so this is always Some.
-                    let now = Local::now()
+                    // never for the literal 0 passed here, so this branch is
+                    // unreachable in practice. Skip the tick rather than panic
+                    // the daemon if that ever changes.
+                    let Some(now) = Local::now()
                         .with_second(0)
                         .and_then(|t| t.with_nanosecond(0))
-                        .expect("truncating seconds/nanoseconds to 0 is always valid");
+                    else {
+                        error!("Failed to truncate current time to the minute; skipping tick");
+                        continue;
+                    };
                     for (job_name, entry) in &self.jobs {
-                        if Self::should_trigger(&entry.schedule, now, last_triggered.get(job_name)) {
+                        if Self::is_freshly_due(&entry.schedule, now, last_triggered.get(job_name)) {
                             last_triggered.insert(job_name.clone(), now);
                             let job_name = job_name.clone();
                             if let Err(e) = tx.send(job_name).await {
@@ -252,7 +266,7 @@ mod tests {
         // Mondays. 2026-01-04 is a Sunday.
         let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap(); // Sundays 02:00
         let sunday_2am = Local.with_ymd_and_hms(2026, 1, 4, 2, 0, 0).unwrap();
-        assert!(Scheduler::should_trigger(&schedule, sunday_2am, None));
+        assert!(Scheduler::is_freshly_due(&schedule, sunday_2am, None));
     }
 
     #[test]
@@ -262,15 +276,15 @@ mod tests {
         // Sunday, so a Sundays-only schedule must not fire.
         let schedule = Scheduler::parse_cron("0 2 * * 1").unwrap();
         let monday_2am = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
-        assert!(!Scheduler::should_trigger(&schedule, monday_2am, None));
+        assert!(!Scheduler::is_freshly_due(&schedule, monday_2am, None));
     }
 
     #[test]
     fn test_should_trigger_skips_duplicate_minute() {
         let schedule = Scheduler::parse_cron("* * * * *").unwrap();
         let now = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
-        assert!(Scheduler::should_trigger(&schedule, now, None));
-        assert!(!Scheduler::should_trigger(&schedule, now, Some(&now)));
+        assert!(Scheduler::is_freshly_due(&schedule, now, None));
+        assert!(!Scheduler::is_freshly_due(&schedule, now, Some(&now)));
     }
 
     #[test]
@@ -278,7 +292,7 @@ mod tests {
         let schedule = Scheduler::parse_cron("* * * * *").unwrap();
         let minute_one = Local.with_ymd_and_hms(2026, 1, 5, 2, 0, 0).unwrap();
         let minute_two = Local.with_ymd_and_hms(2026, 1, 5, 2, 1, 0).unwrap();
-        assert!(Scheduler::should_trigger(
+        assert!(Scheduler::is_freshly_due(
             &schedule,
             minute_two,
             Some(&minute_one)
