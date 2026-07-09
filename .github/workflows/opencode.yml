@@ -44,7 +44,7 @@ jobs:
           fetch-depth: ${{ inputs.include_pr_context && 0 || 1 }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run OpenCode
-        uses: anomalyco/opencode/github@v1.14.17
+        uses: anomalyco/opencode/github@a948b1c539c6324beebc016a8503d3bf4fce5e97 # v1.14.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLLAMA_API_KEY: ${{ secrets.api_key }}
