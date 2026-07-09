@@ -12,10 +12,8 @@ jobs:
   review:
     uses: ./.github/workflows/opencode.yml
     permissions:
-      id-token: write
-      contents: write
+      contents: read
       pull-requests: write
-      issues: write
     with:
       include_pr_context: true
       model: 'ollama-cloud/minimax-m3'

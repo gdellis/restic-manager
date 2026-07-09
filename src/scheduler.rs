@@ -191,18 +191,55 @@ impl Scheduler {
                                 .await;
 
                                 match join_result {
+                                    Ok(Ok(result)) if result.partial => {
+                                        warn!(job = %name, snapshot = ?result.snapshot_id, errors_count = result.errors_count, "Backup completed with errors (partial)");
+                                        if let Some(ref n) = notifier {
+                                            let error_detail = if result.errors_count > 0 {
+                                                format!(
+                                                    "{} file(s) could not be read",
+                                                    result.errors_count
+                                                )
+                                            } else {
+                                                "some files could not be read".to_string()
+                                            };
+                                            // Best-effort: a Telegram outage here shouldn't fail
+                                            // the whole scheduled-run task (the backup itself
+                                            // already succeeded/partially succeeded), but log it
+                                            // so a real outage is still visible.
+                                            if let Err(e) = n
+                                                .notify_partial(
+                                                    &name,
+                                                    result.snapshot_id.as_deref(),
+                                                    &error_detail,
+                                                )
+                                                .await
+                                            {
+                                                warn!(job = %name, error = %e, "Failed to send partial-backup notification");
+                                            }
+                                        }
+                                    }
                                     Ok(Ok(result)) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n
+                                            // Best-effort: see the partial-notification comment
+                                            // above for why send failures are logged, not
+                                            // propagated.
+                                            if let Err(e) = n
                                                 .notify_success(&name, result.snapshot_id.as_deref())
-                                                .await;
+                                                .await
+                                            {
+                                                warn!(job = %name, error = %e, "Failed to send success notification");
+                                            }
                                         }
                                     }
                                     Ok(Err(e)) => {
                                         error!(job = %name, error = %e, "Backup failed");
                                         if let Some(ref n) = notifier {
-                                            let _ = n.notify_failure(&name, &e.to_string()).await;
+                                            if let Err(notify_err) =
+                                                n.notify_failure(&name, &e.to_string()).await
+                                            {
+                                                warn!(job = %name, error = %notify_err, "Failed to send failure notification");
+                                            }
                                         }
                                     }
                                     Err(join_err) => {
@@ -214,12 +251,15 @@ impl Scheduler {
                                         // ever introduced - that's intentional, not a bug.
                                         error!(job = %name, error = %join_err, "Backup task panicked");
                                         if let Some(ref n) = notifier {
-                                            let _ = n
+                                            if let Err(notify_err) = n
                                                 .notify_failure(
                                                     &name,
                                                     &format!("Backup task panicked: {}", join_err),
                                                 )
-                                                .await;
+                                                .await
+                                            {
+                                                warn!(job = %name, error = %notify_err, "Failed to send panic-failure notification");
+                                            }
                                         }
                                     }
                                 }

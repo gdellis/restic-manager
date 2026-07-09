@@ -31,11 +31,12 @@ jobs:
   opencode:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      id-token: write
-      contents: write
-      pull-requests: write
-      issues: write
+    # No permissions: block here - a reusable workflow's job permissions
+    # must be a subset of what its caller grants, or the run fails at
+    # startup. Deferring to the caller (pr_commet.yml grants broad write
+    # access; pr_reviewer.yml grants only read+PR-comment) lets each
+    # caller's own permissions block be authoritative instead of this one
+    # hardcoding the broadest caller's needs for every caller.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.1
@@ -44,7 +45,7 @@ jobs:
           fetch-depth: ${{ inputs.include_pr_context && 0 || 1 }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run OpenCode
-        uses: anomalyco/opencode/github@v1.14.17
+        uses: anomalyco/opencode/github@a948b1c539c6324beebc016a8503d3bf4fce5e97 # v1.14.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLLAMA_API_KEY: ${{ secrets.api_key }}

@@ -10,6 +10,11 @@ pub struct TelegramConfig {
     pub chat_id: Option<String>,
 }
 
+// Unlike the config.rs structs, this intentionally does NOT set
+// #[serde(deny_unknown_fields)]: serde doesn't support combining
+// deny_unknown_fields with #[serde(flatten)] (a known limitation - it's a
+// compile error), and `values` needs to stay flattened to accept arbitrary
+// user-defined keys.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Secrets {
     #[serde(flatten)]

@@ -65,10 +65,25 @@ pub fn cli_run() -> Result<(), AppError> {
     match cli.command {
         Commands::Run { name, dry_run } => {
             let result = Backup::run(&config, &name, dry_run)?;
-            println!(
-                "Backup completed: {} new, {} changed, {} unchanged files",
-                result.files_new, result.files_changed, result.files_unmodified
-            );
+            // This one-shot `run` invocation has no NotificationManager, so
+            // a partial result is only ever surfaced here via println! -
+            // there's no separate notify_partial call to add for the CLI
+            // path, unlike the scheduler's dispatch arm.
+            if result.partial {
+                println!(
+                    "Backup completed with errors (partial): {} new, {} changed, {} unchanged files. \
+                     {} file(s) could not be read.",
+                    result.files_new,
+                    result.files_changed,
+                    result.files_unmodified,
+                    result.errors_count
+                );
+            } else {
+                println!(
+                    "Backup completed: {} new, {} changed, {} unchanged files",
+                    result.files_new, result.files_changed, result.files_unmodified
+                );
+            }
             if let Some(snap) = result.snapshot_id {
                 println!("Snapshot ID: {}", snap);
             }
@@ -88,7 +103,11 @@ pub fn cli_run() -> Result<(), AppError> {
         }
         Commands::Prune { name } => {
             let removed = SnapshotManager::apply_retention(&config, &name, false)?;
-            println!("Pruned {} snapshots for job '{}'", removed.len(), name);
+            println!(
+                "Retention applied for job '{}': removed {} snapshot(s)",
+                name,
+                removed.len()
+            );
         }
         Commands::List { name } => {
             let snapshots = SnapshotManager::list(&config, &name)?;

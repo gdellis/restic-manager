@@ -49,7 +49,7 @@ impl Notifications {
             return Ok(());
         }
 
-        if !self.check_rate_limit(true) {
+        if self.is_rate_limited(true) {
             warn!(job = job_name, "Failure notification rate limited");
             return Ok(());
         }
@@ -57,7 +57,37 @@ impl Notifications {
         let message = format!("❌ Backup Failed: {}\n\nError: {}", job_name, error);
 
         self.send_telegram(&message).await?;
+        self.record_notification_sent(true);
         info!(job = job_name, "Failure notification sent");
+        Ok(())
+    }
+
+    pub async fn send_partial(
+        &self,
+        job_name: &str,
+        snapshot_id: Option<&str>,
+        error: &str,
+    ) -> Result<(), AppError> {
+        if !self.is_configured() {
+            return Ok(());
+        }
+
+        // Shares the failure rate-limit slot so a partial backup and a hard
+        // failure in the same window don't double alert volume.
+        if self.is_rate_limited(true) {
+            warn!(job = job_name, "Partial notification rate limited");
+            return Ok(());
+        }
+
+        let snap = snapshot_id.unwrap_or("none");
+        let message = format!(
+            "⚠️ Backup Partial: {}\n\nSnapshot: {}\nSome files could not be read: {}",
+            job_name, snap, error
+        );
+
+        self.send_telegram(&message).await?;
+        self.record_notification_sent(true);
+        info!(job = job_name, "Partial notification sent");
         Ok(())
     }
 
@@ -70,7 +100,7 @@ impl Notifications {
             return Ok(());
         }
 
-        if !self.check_rate_limit(false) {
+        if self.is_rate_limited(false) {
             return Ok(());
         }
 
@@ -81,27 +111,34 @@ impl Notifications {
         };
 
         self.send_telegram(&message).await?;
+        self.record_notification_sent(false);
         info!(job = job_name, "Success notification sent");
         Ok(())
     }
 
-    fn check_rate_limit(&self, is_failure: bool) -> bool {
-        let mut limiter = self.rate_limiter.lock().unwrap();
-        let now = std::time::Instant::now();
+    /// Returns true if a notification of this kind was sent within
+    /// `MIN_NOTIFICATION_INTERVAL`. Read-only - callers must call
+    /// `record_notification_sent` themselves after a successful send, so a
+    /// failed send doesn't consume the rate-limit window.
+    fn is_rate_limited(&self, is_failure: bool) -> bool {
+        let limiter = self.rate_limiter.lock().unwrap();
         let last_notification = if is_failure {
-            &mut limiter.last_failure_notification
+            limiter.last_failure_notification
         } else {
-            &mut limiter.last_success_notification
+            limiter.last_success_notification
         };
 
-        if let Some(last) = last_notification {
-            if now.duration_since(*last) < MIN_NOTIFICATION_INTERVAL {
-                return false;
-            }
-        }
+        matches!(last_notification, Some(last) if std::time::Instant::now().duration_since(last) < MIN_NOTIFICATION_INTERVAL)
+    }
 
-        *last_notification = Some(now);
-        true
+    fn record_notification_sent(&self, is_failure: bool) {
+        let mut limiter = self.rate_limiter.lock().unwrap();
+        let now = std::time::Instant::now();
+        if is_failure {
+            limiter.last_failure_notification = Some(now);
+        } else {
+            limiter.last_success_notification = Some(now);
+        }
     }
 
     /// Telegram's Markdown parser treats `_`, `*`, `` ` ``, `[` as special
@@ -184,6 +221,26 @@ impl NotificationManager {
         if self.job_config.on_success {
             self.notifications
                 .send_success(job_name, snapshot_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Partial backups (some files unreadable) are routed through the
+    /// on_failure toggle rather than on_success: on_failure defaults to
+    /// true and on_success defaults to false, so routing through
+    /// on_success would silently produce zero notification for a partial
+    /// backup under the default config - exactly the failure-adjacent case
+    /// where alerting matters most.
+    pub async fn notify_partial(
+        &self,
+        job_name: &str,
+        snapshot_id: Option<&str>,
+        error: &str,
+    ) -> Result<(), AppError> {
+        if self.job_config.on_failure {
+            self.notifications
+                .send_partial(job_name, snapshot_id, error)
                 .await?;
         }
         Ok(())
@@ -430,5 +487,77 @@ mod tests {
         };
         let notifications = Notifications::new(&config);
         assert!(notifications.is_configured());
+    }
+
+    #[test]
+    fn test_is_rate_limited_does_not_mutate_state() {
+        // Regression test for #40: is_rate_limited must be read-only.
+        // Previously, checking the rate limit had the side effect of
+        // recording "we just notified" even if the caller never actually
+        // sent anything - so a failed send would silently poison the
+        // window for every real failure afterward.
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        assert!(!notifications.is_rate_limited(true));
+        assert!(
+            !notifications.is_rate_limited(true),
+            "checking the rate limit alone must not consume it"
+        );
+    }
+
+    #[test]
+    fn test_record_notification_sent_then_rate_limited() {
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        assert!(!notifications.is_rate_limited(true));
+        notifications.record_notification_sent(true);
+        assert!(notifications.is_rate_limited(true));
+    }
+
+    #[test]
+    fn test_failure_and_success_rate_limits_are_independent() {
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        notifications.record_notification_sent(true);
+        assert!(notifications.is_rate_limited(true));
+        assert!(!notifications.is_rate_limited(false));
+    }
+
+    #[tokio::test]
+    async fn test_send_partial_not_configured() {
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        let result = notifications
+            .send_partial("test-job", Some("snap123"), "3 files unreadable")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_notify_partial_respects_on_failure_flag() {
+        let config = test_config();
+        let job_config = NotificationConfig {
+            on_failure: false,
+            on_success: false,
+        };
+        let manager = NotificationManager::new(&config, job_config);
+        let result = manager
+            .notify_partial("test-job", Some("snap123"), "err")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_notify_partial_enabled_via_on_failure() {
+        let config = test_config();
+        let job_config = NotificationConfig {
+            on_failure: true,
+            on_success: false,
+        };
+        let manager = NotificationManager::new(&config, job_config);
+        let result = manager
+            .notify_partial("test-job", Some("snap123"), "err")
+            .await;
+        assert!(result.is_ok());
     }
 }

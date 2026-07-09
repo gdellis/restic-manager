@@ -237,10 +237,14 @@ restic-manager list <job>       # List snapshots for job
 restic-manager check <job>      # Check repository integrity
 restic-manager unlock <job>     # Unlock stuck processes
 restic-manager daemon           # Run scheduler in foreground
-restic-manager job list         # List all configured jobs
-restic-manager job add <file>   # Add job from file
+restic-manager jobs             # List all configured jobs
+restic-manager repos            # List all configured repositories
 restic-manager init <repo>      # Initialize repository
+restic-manager init-exclude     # Create/reset the default exclude file
 ```
+
+There is no `job add` command - jobs and repositories are configured by editing `config.yaml`
+directly, not through the CLI.
 
 ## Configuration
 
@@ -296,8 +300,10 @@ jobs:
 telegram:
   bot_token: <token>
   chat_id: <chat-id>
-s3_access_key: <key>
-s3_secret_key: <secret>
+# s3_access_key/s3_secret_key: illustrative only. Arbitrary <key>: <value> entries are
+# referenced by a repository's password_key; restic-manager doesn't read or special-case
+# these specific names. Restic itself picks up S3 credentials via its own environment
+# variables (set separately) - restic-manager doesn't pass secrets.yaml keys through to them.
 ```
 
 Stored plaintext, so file permissions must be `0600` (owner-only). `Secrets::load`/`load_optional`
@@ -308,8 +314,8 @@ warn (but don't fail) if the file is more permissive than that.
 ### src/cli.rs
 
 - Clap-based CLI with subcommands
-- Shell completion support
-- Colored output for errors/warnings
+- Shell completion support - **not yet implemented**
+- Colored output for errors/warnings - **not yet implemented** (plain `println!`/`eprintln!`)
 
 ### src/config.rs
 
@@ -323,7 +329,7 @@ warn (but don't fail) if the file is more permissive than that.
 - `init` - Initialize new repository
 - `check` - Verify repository integrity
 - `unlock` - Remove stale locks
-- `cat` - Read files from repo
+- `cat` - Read files from repo - **not yet implemented**
 
 ### src/backup.rs
 
@@ -351,7 +357,7 @@ warn (but don't fail) if the file is more permissive than that.
 - Job queue with concurrency control
 - Graceful shutdown handling
 
-### src/notification.rs
+### src/notifications.rs
 
 - Telegram bot integration
 - Send messages on job completion/failure
@@ -364,11 +370,8 @@ warn (but don't fail) if the file is more permissive than that.
 - ConfigError, ResticError, NotificationError
 - Display impl for user-friendly messages
 
-### src/logging.rs
-
-- Tracing-based structured logging
-- File rotation for logs
-- Log levels: error, warn, info, debug
+Logging is not a dedicated module - it's set up inline via `tracing`/`tracing-subscriber` in
+`main.rs`/`cli.rs`, with no file rotation. A standalone `src/logging.rs` is **not yet implemented**.
 
 ## Execution Flow
 
