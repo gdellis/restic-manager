@@ -192,7 +192,8 @@ erDiagram
         string name
         string repository
         list paths
-        list exclude
+        list exclude_patterns
+        string exclude_file
         string schedule
     }
 
@@ -200,7 +201,9 @@ erDiagram
         int keep_daily
         int keep_weekly
         int keep_monthly
+        int keep_yearly
         int keep_hourly
+        int keep_last
     }
 
     NOTIFICATION {
@@ -209,9 +212,11 @@ erDiagram
     }
 
     HOOK {
+        string type
         string command
         list args
-        int wait_seconds
+        bool continue_on_error
+        int seconds
     }
 
     SECRETS {
@@ -265,23 +270,27 @@ jobs:
     repository: <repository-name>
     paths:
       - /path/to/backup
-    exclude:
+    exclude_patterns:
       - "*.tmp"
       - ".cache/**"
     schedule: "<cron-expression>"
     retention:
-      keep-daily: 7
-      keep-weekly: 4
-      keep-monthly: 6
+      keep_daily: 7
+      keep_weekly: 4
+      keep_monthly: 6
     notifications:
       on_failure: true
       on_success: false
     pre_backup:
-      - command: <binary>
+      - type: Command
+        command: <binary>
         args: ["arg1", "arg2"]
-      - wait: <seconds>
+        continue_on_error: false  # default; abort the backup if this hook fails
+      - type: Wait
+        seconds: <seconds>
     post_backup:
-      - command: <binary>
+      - type: Command
+        command: <binary>
         args: ["arg1", "arg2"]
 ```
 
