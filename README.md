@@ -179,7 +179,7 @@ restic-manager init local
 cargo build
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt
+cargo fmt --check
 cargo coverage
 ```
 
