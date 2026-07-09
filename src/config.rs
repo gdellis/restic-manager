@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub repositories: HashMap<String, Repository>,
@@ -61,6 +62,7 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Repository {
     pub repo: String,
     pub password_key: String,
@@ -69,6 +71,7 @@ pub struct Repository {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionPolicy {
     #[serde(default)]
     pub keep_daily: Option<u32>,
@@ -102,6 +105,7 @@ impl Default for RetentionPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotificationConfig {
     #[serde(default = "default_true")]
     pub on_failure: bool,
@@ -123,7 +127,7 @@ impl Default for NotificationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Hook {
     Command {
         command: String,
@@ -142,6 +146,7 @@ pub enum Hook {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Job {
     pub repository: String,
     pub paths: Vec<PathBuf>,
@@ -303,5 +308,49 @@ mod tests {
         let mut config = test_config();
         config.secrets.values.clear();
         assert!(config.resolve_repo("test-repo").is_err());
+    }
+
+    /// Regression test for #31: a typo'd retention field must fail to
+    /// deserialize instead of silently no-oping with the default policy.
+    #[test]
+    fn test_retention_policy_rejects_unknown_field() {
+        let yaml = "keep_dayly: 7\nkeep_weekly: 4\n";
+        let result: Result<RetentionPolicy, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_job_rejects_unknown_field() {
+        let yaml = r#"
+repository: test-repo
+paths:
+  - /home
+shedule: "0 2 * * *"
+"#;
+        let result: Result<Job, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_rejects_unknown_top_level_field() {
+        let yaml = r#"
+repositories: {}
+jobs: {}
+extra_unknown_key: true
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hook_command_rejects_unknown_field() {
+        let yaml = r#"
+type: Command
+command: /usr/bin/true
+args: []
+unknown_field: 1
+"#;
+        let result: Result<Hook, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
     }
 }
