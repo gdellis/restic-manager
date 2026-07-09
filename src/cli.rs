@@ -65,6 +65,10 @@ pub fn cli_run() -> Result<(), AppError> {
     match cli.command {
         Commands::Run { name, dry_run } => {
             let result = Backup::run(&config, &name, dry_run)?;
+            // This one-shot `run` invocation has no NotificationManager, so
+            // a partial result is only ever surfaced here via println! -
+            // there's no separate notify_partial call to add for the CLI
+            // path, unlike the scheduler's dispatch arm.
             if result.partial {
                 println!(
                     "Backup completed with errors (partial): {} new, {} changed, {} unchanged files. \

@@ -263,6 +263,15 @@ impl Backup {
             warn!(stderr = text, "restic wrote to stderr");
         }
 
+        // Write the CLI output log before handling the exit status, so a
+        // hard failure (wrong password, network error, unreachable repo)
+        // still gets logged - that's exactly the case log_cli_output is
+        // most useful for, and it would otherwise be silently skipped by
+        // the early return below.
+        if let Some(log_path) = log_file {
+            Self::write_cli_output_log(log_path, &lines, stderr_text.as_deref());
+        }
+
         // Exit code 3: backup completed but some source files could not be
         // read. Restic still creates a snapshot and writes its summary, so
         // treat this as a partial success rather than a fatal failure -
@@ -272,10 +281,6 @@ impl Backup {
         let partial = status.code() == Some(3);
         if !status.success() && !partial {
             return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
-        }
-
-        if let Some(log_path) = log_file {
-            Self::write_cli_output_log(log_path, &lines, stderr_text.as_deref());
         }
 
         let output = lines.join("\n");
