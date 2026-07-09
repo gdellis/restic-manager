@@ -212,6 +212,7 @@ erDiagram
         bool continue_on_error
         int seconds
     }
+    %% command/args/continue_on_error apply when type: Command; seconds applies when type: Wait
 
     SECRETS {
         dict values
