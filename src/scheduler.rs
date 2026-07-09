@@ -191,6 +191,18 @@ impl Scheduler {
                                 .await;
 
                                 match join_result {
+                                    Ok(Ok(result)) if result.partial => {
+                                        warn!(job = %name, snapshot = ?result.snapshot_id, "Backup completed with errors (partial)");
+                                        if let Some(ref n) = notifier {
+                                            let _ = n
+                                                .notify_partial(
+                                                    &name,
+                                                    result.snapshot_id.as_deref(),
+                                                    "some files could not be read",
+                                                )
+                                                .await;
+                                        }
+                                    }
                                     Ok(Ok(result)) => {
                                         info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
                                         if let Some(ref n) = notifier {

@@ -65,10 +65,18 @@ pub fn cli_run() -> Result<(), AppError> {
     match cli.command {
         Commands::Run { name, dry_run } => {
             let result = Backup::run(&config, &name, dry_run)?;
-            println!(
-                "Backup completed: {} new, {} changed, {} unchanged files",
-                result.files_new, result.files_changed, result.files_unmodified
-            );
+            if result.partial {
+                println!(
+                    "Backup completed with errors (partial): {} new, {} changed, {} unchanged files. \
+                     Some source files could not be read.",
+                    result.files_new, result.files_changed, result.files_unmodified
+                );
+            } else {
+                println!(
+                    "Backup completed: {} new, {} changed, {} unchanged files",
+                    result.files_new, result.files_changed, result.files_unmodified
+                );
+            }
             if let Some(snap) = result.snapshot_id {
                 println!("Snapshot ID: {}", snap);
             }

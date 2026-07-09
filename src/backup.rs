@@ -59,6 +59,9 @@ pub struct BackupResult {
     pub tree_blobs: u32,
     pub data_added: u64,
     pub duration_secs: f64,
+    /// True if restic exited with code 3 (backup completed but some source
+    /// files could not be read). A snapshot was still created in this case.
+    pub partial: bool,
 }
 
 pub struct Backup;
@@ -103,13 +106,21 @@ impl Backup {
             );
         }
 
-        info!(
-            job = job_name,
-            snapshot = ?result.snapshot_id,
-            files_new = result.files_new,
-            data_added = result.data_added,
-            "Backup completed successfully"
-        );
+        if result.partial {
+            warn!(
+                job = job_name,
+                snapshot = ?result.snapshot_id,
+                "Backup completed with errors (partial, some files unreadable)"
+            );
+        } else {
+            info!(
+                job = job_name,
+                snapshot = ?result.snapshot_id,
+                files_new = result.files_new,
+                data_added = result.data_added,
+                "Backup completed successfully"
+            );
+        }
 
         Ok(result)
     }
@@ -162,13 +173,6 @@ impl Backup {
 
         let mut cmd = Command::new("restic");
         cmd.args(&args).env("RESTIC_PASSWORD", password);
-
-        if let Some(log_path) = log_file {
-            if let Some(parent) = log_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            cmd.env("DEBUG_LOG", log_path);
-        }
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -259,21 +263,64 @@ impl Backup {
             warn!(stderr = text, "restic wrote to stderr");
         }
 
-        if !status.success() {
+        // Exit code 3: backup completed but some source files could not be
+        // read. Restic still creates a snapshot and writes its summary, so
+        // treat this as a partial success rather than a fatal failure -
+        // otherwise the already-parsed snapshot ID gets discarded and the
+        // caller can't tell "nothing was backed up" from "everything except
+        // a few unreadable files was backed up."
+        let partial = status.code() == Some(3);
+        if !status.success() && !partial {
             return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
         }
 
+        if let Some(log_path) = log_file {
+            Self::write_cli_output_log(log_path, &lines, stderr_text.as_deref());
+        }
+
         let output = lines.join("\n");
-        let result = Self::parse_backup_output(&output)?;
+        let mut result = Self::parse_backup_output(&output)?;
+        result.partial = partial;
 
         info!(
             snapshot = ?result.snapshot_id,
             files_new = result.files_new,
             files_changed = result.files_changed,
+            partial = partial,
             "Backup completed"
         );
 
         Ok(result)
+    }
+
+    /// Appends this run's stdout lines and any stderr output to `log_path`,
+    /// so `Repository::log_cli_output` actually captures the CLI output its
+    /// name promises, instead of restic's internal `DEBUG_LOG` tracer.
+    fn write_cli_output_log(log_path: &std::path::Path, lines: &[String], stderr: Option<&str>) {
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let mut entry = format!("=== {} ===\n{}\n", chrono::Local::now(), lines.join("\n"));
+        if let Some(stderr) = stderr.filter(|s| !s.is_empty()) {
+            entry.push_str("--- stderr ---\n");
+            entry.push_str(stderr);
+            entry.push('\n');
+        }
+
+        use std::io::Write;
+        if let Err(e) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .and_then(|mut f| f.write_all(entry.as_bytes()))
+        {
+            warn!(
+                "Failed to write CLI output log to {}: {}",
+                log_path.display(),
+                e
+            );
+        }
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
@@ -301,6 +348,7 @@ impl Backup {
             tree_blobs: summary["tree_blobs"].as_u64().unwrap_or(0) as u32,
             data_added: summary["data_added"].as_u64().unwrap_or(0),
             duration_secs: summary["duration"].as_f64().unwrap_or(0.0),
+            partial: false,
         })
     }
 
@@ -571,6 +619,43 @@ mod tests {
         assert_eq!(r.files_new, 0);
         assert_eq!(r.data_added, 0);
         assert_eq!(r.snapshot_id, None);
+    }
+
+    #[test]
+    fn test_parse_backup_output_partial_defaults_false() {
+        // parse_backup_output has no notion of the process exit code, so
+        // `partial` must always come back false here - execute_backup is
+        // responsible for setting it based on the exit status afterward.
+        let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
+        let result = Backup::parse_backup_output(json).unwrap();
+        assert!(!result.partial);
+    }
+
+    #[test]
+    fn test_write_cli_output_log_appends_across_calls() {
+        let dir = std::env::temp_dir().join(format!(
+            "restic-manager-test-cli-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_path = dir.join("nested").join("backup.log");
+
+        Backup::write_cli_output_log(&log_path, &["first run line".to_string()], None);
+        Backup::write_cli_output_log(
+            &log_path,
+            &["second run line".to_string()],
+            Some("a stderr warning"),
+        );
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("first run line"));
+        assert!(contents.contains("second run line"));
+        assert!(contents.contains("a stderr warning"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
