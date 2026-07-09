@@ -18,8 +18,9 @@ A Rust project for managing restic backups.
 - `cargo fmt --check` - Verify formatting (matches CI; plain `cargo fmt` rewrites files instead of
   checking them)
 - `cargo check` - Check for errors
-- `npx markdownlint-cli2 "**/*.md"` - Lint Markdown files (any edited `.md` file must pass this;
-  see `.markdownlint.json` for the 120-char line-length limit)
+- `npx markdownlint-cli "**/*.md"` - Lint Markdown files (matches the pre-commit hook; any edited
+  `.md` file must pass this, see `.markdownlint.json` for the 120-char line-length limit. CI itself
+  uses `markdownlint-cli2`, which enforces the same rule config but is a different tool version)
 
 ### Git Operations
 
@@ -39,8 +40,8 @@ git push -u origin feature/your-feature
 
 ## Code Style
 
-- Use `cargo fmt` for formatting
-- Use `cargo clippy` for linting
+- Use `cargo fmt --check` to verify formatting
+- Use `cargo clippy --all-targets --all-features -- -D warnings` to lint
 - Use `Result<T, E>` over panics
 - Write doc comments for public functions
 
