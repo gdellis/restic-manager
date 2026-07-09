@@ -62,6 +62,9 @@ pub struct BackupResult {
     /// True if restic exited with code 3 (backup completed but some source
     /// files could not be read). A snapshot was still created in this case.
     pub partial: bool,
+    /// Highest error_count seen across restic's "status" progress messages
+    /// during this run. Only meaningful when `partial` is true.
+    pub errors_count: u64,
 }
 
 pub struct Backup;
@@ -110,6 +113,9 @@ impl Backup {
             warn!(
                 job = job_name,
                 snapshot = ?result.snapshot_id,
+                files_new = result.files_new,
+                data_added = result.data_added,
+                errors_count = result.errors_count,
                 "Backup completed with errors (partial, some files unreadable)"
             );
         } else {
@@ -200,6 +206,10 @@ impl Backup {
         });
 
         let mut lines: Vec<String> = Vec::new();
+        // Tracks the highest error_count seen across "status" messages, so
+        // a partial backup's notification can report how many files were
+        // actually unreadable instead of a generic message.
+        let mut last_error_count: u64 = 0;
 
         if let Some(stdout) = stdout {
             use std::io::{BufRead, BufReader};
@@ -227,6 +237,7 @@ impl Backup {
                                     .get("error_count")
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0);
+                                last_error_count = last_error_count.max(errors);
                                 if total_files > 0 {
                                     let progress = format_progress(
                                         files_done,
@@ -286,12 +297,14 @@ impl Backup {
         let output = lines.join("\n");
         let mut result = Self::parse_backup_output(&output)?;
         result.partial = partial;
+        result.errors_count = last_error_count;
 
         info!(
             snapshot = ?result.snapshot_id,
             files_new = result.files_new,
             files_changed = result.files_changed,
             partial = partial,
+            errors_count = last_error_count,
             "Backup completed"
         );
 
@@ -301,6 +314,25 @@ impl Backup {
     /// Appends this run's stdout lines and any stderr output to `log_path`,
     /// so `Repository::log_cli_output` actually captures the CLI output its
     /// name promises, instead of restic's internal `DEBUG_LOG` tracer.
+    ///
+    /// Each entry is capped at `MAX_CLI_LOG_ENTRY_LEN`, since restic can
+    /// emit one JSON status line per file for a large backup - without a
+    /// cap this file would grow unbounded per run, the same problem #42
+    /// was filed to fix in the first place (just on a different code path).
+    const MAX_CLI_LOG_ENTRY_LEN: usize = 1_048_576;
+
+    fn truncate_cli_log_entry(entry: &str) -> String {
+        if entry.len() <= Self::MAX_CLI_LOG_ENTRY_LEN {
+            return entry.to_string();
+        }
+        let suffix = "\n... (truncated)\n";
+        let mut end = Self::MAX_CLI_LOG_ENTRY_LEN.saturating_sub(suffix.len());
+        while end > 0 && !entry.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &entry[..end], suffix)
+    }
+
     fn write_cli_output_log(log_path: &std::path::Path, lines: &[String], stderr: Option<&str>) {
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -312,6 +344,7 @@ impl Backup {
             entry.push_str(stderr);
             entry.push('\n');
         }
+        let entry = Self::truncate_cli_log_entry(&entry);
 
         use std::io::Write;
         if let Err(e) = std::fs::OpenOptions::new()
@@ -354,6 +387,7 @@ impl Backup {
             data_added: summary["data_added"].as_u64().unwrap_or(0),
             duration_secs: summary["duration"].as_f64().unwrap_or(0.0),
             partial: false,
+            errors_count: 0,
         })
     }
 
@@ -634,6 +668,37 @@ mod tests {
         let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
         let result = Backup::parse_backup_output(json).unwrap();
         assert!(!result.partial);
+    }
+
+    #[test]
+    fn test_parse_backup_output_errors_count_defaults_zero() {
+        // Same reasoning as partial: errors_count comes from "status"
+        // messages tracked during the run, not the final summary, so
+        // parse_backup_output alone must always return 0.
+        let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
+        let result = Backup::parse_backup_output(json).unwrap();
+        assert_eq!(result.errors_count, 0);
+    }
+
+    #[test]
+    fn test_truncate_cli_log_entry_short_text_unchanged() {
+        let entry = "a short log entry";
+        assert_eq!(Backup::truncate_cli_log_entry(entry), entry);
+    }
+
+    #[test]
+    fn test_truncate_cli_log_entry_over_limit_is_truncated() {
+        let entry = "a".repeat(Backup::MAX_CLI_LOG_ENTRY_LEN + 500);
+        let result = Backup::truncate_cli_log_entry(&entry);
+        assert!(result.len() <= Backup::MAX_CLI_LOG_ENTRY_LEN);
+        assert!(result.ends_with("(truncated)\n"));
+    }
+
+    #[test]
+    fn test_truncate_cli_log_entry_respects_char_boundaries() {
+        let entry = "é".repeat(Backup::MAX_CLI_LOG_ENTRY_LEN);
+        let result = Backup::truncate_cli_log_entry(&entry);
+        assert!(result.len() <= Backup::MAX_CLI_LOG_ENTRY_LEN);
     }
 
     #[test]

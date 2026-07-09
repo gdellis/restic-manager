@@ -72,8 +72,11 @@ pub fn cli_run() -> Result<(), AppError> {
             if result.partial {
                 println!(
                     "Backup completed with errors (partial): {} new, {} changed, {} unchanged files. \
-                     Some source files could not be read.",
-                    result.files_new, result.files_changed, result.files_unmodified
+                     {} file(s) could not be read.",
+                    result.files_new,
+                    result.files_changed,
+                    result.files_unmodified,
+                    result.errors_count
                 );
             } else {
                 println!(
