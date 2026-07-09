@@ -103,7 +103,11 @@ pub fn cli_run() -> Result<(), AppError> {
         }
         Commands::Prune { name } => {
             let removed = SnapshotManager::apply_retention(&config, &name, false)?;
-            println!("Pruned {} snapshots for job '{}'", removed.len(), name);
+            println!(
+                "Retention applied for job '{}': removed {} snapshot(s)",
+                name,
+                removed.len()
+            );
         }
         Commands::List { name } => {
             let snapshots = SnapshotManager::list(&config, &name)?;
