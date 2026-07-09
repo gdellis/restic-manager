@@ -157,16 +157,15 @@ impl SnapshotManager {
             return Ok(vec![]);
         }
 
-        let lines: Vec<&str> = output.lines().collect();
-        let mut removed_ids = Vec::new();
+        let groups: Vec<serde_json::Value> = serde_json::from_str(output)
+            .map_err(|e| AppError::Other(format!("Failed to parse forget JSON: {}", e)))?;
 
-        for line in lines {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(removed) = json["removed"].as_array() {
-                    for snap in removed {
-                        if let Some(id) = snap["id"].as_str() {
-                            removed_ids.push(id.to_string());
-                        }
+        let mut removed_ids = Vec::new();
+        for group in &groups {
+            if let Some(removed) = group["remove"].as_array() {
+                for snap in removed {
+                    if let Some(id) = snap["id"].as_str() {
+                        removed_ids.push(id.to_string());
                     }
                 }
             }
@@ -367,11 +366,38 @@ mod tests {
 
     #[test]
     fn test_parse_forget_output_json() {
-        let output = r#"{"removed":[{"id":"snap1","short_id":"abc"}],"kept":3}"#;
+        // Real restic `forget --json` shape: a single JSON array of policy
+        // groups, each with a "remove" (not "removed") array of snapshots.
+        let output = r#"[{"tags":null,"host":"h","paths":["/x"],"keep":[],"remove":[{"id":"snap1","short_id":"abc"}],"reasons":[]}]"#;
         let result = SnapshotManager::parse_forget_output(output);
         assert!(result.is_ok());
         let removed = result.unwrap();
         assert_eq!(removed, vec!["snap1"]);
+    }
+
+    #[test]
+    fn test_parse_forget_output_multiple_groups() {
+        let output = r#"[
+            {"tags":null,"host":"h","paths":["/x"],"keep":[],"remove":[{"id":"snap1","short_id":"abc"}],"reasons":[]},
+            {"tags":null,"host":"h","paths":["/y"],"keep":[],"remove":[{"id":"snap2","short_id":"def"},{"id":"snap3","short_id":"ghi"}],"reasons":[]}
+        ]"#;
+        let result = SnapshotManager::parse_forget_output(output);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec!["snap1", "snap2", "snap3"]);
+    }
+
+    #[test]
+    fn test_parse_forget_output_empty_remove_array() {
+        let output = r#"[{"tags":null,"host":"h","paths":["/x"],"keep":[{"id":"kept1"}],"remove":[],"reasons":[]}]"#;
+        let result = SnapshotManager::parse_forget_output(output);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_forget_output_malformed_json_errors() {
+        let result = SnapshotManager::parse_forget_output("not json");
+        assert!(result.is_err());
     }
 
     #[test]
