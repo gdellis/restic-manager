@@ -195,3 +195,105 @@ fn test_secrets_empty_telegram() {
     let secrets: Secrets = serde_yaml::from_str(yaml).unwrap();
     assert!(secrets.telegram.is_none());
 }
+
+/// Regression test for the config.yaml example in README.md's Quick Start
+/// section: parses the exact YAML shown there and asserts every field
+/// actually landed where the doc claims. This catches a documented field
+/// being removed or renamed on the underlying struct (the assertion on
+/// that field would fail to compile or fail at runtime). It does NOT
+/// catch the opposite drift - a new key added to the YAML example that
+/// doesn't exist on the struct - since neither Config nor Job sets
+/// `deny_unknown_fields`, so serde silently drops unknown keys rather
+/// than erroring.
+#[test]
+fn test_readme_quick_start_config_example_is_valid() {
+    let yaml = r#"
+repositories:
+  local:
+    repo: /backup/my-repo
+    password_key: restic-password
+
+jobs:
+  documents:
+    repository: local
+    paths:
+      - /home/user/documents
+    exclude_patterns:
+      - "*.tmp"
+      - ".cache/**"
+    schedule: "0 2 * * *"  # 2 AM daily
+    retention:
+      keep_daily: 7
+      keep_weekly: 4
+      keep_monthly: 6
+    notifications:
+      on_failure: true
+      on_success: false
+    pre_backup:
+      - type: Command
+        command: /usr/local/bin/db-dump.sh
+        args: []
+        continue_on_error: false  # abort the backup if this hook fails (default)
+"#;
+    let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+    let repo = &config.repositories["local"];
+    assert_eq!(repo.repo, "/backup/my-repo");
+    assert_eq!(repo.password_key, "restic-password");
+    assert!(repo.log_cli_output.is_none());
+
+    let job = &config.jobs["documents"];
+    assert_eq!(job.repository, "local");
+    assert_eq!(
+        job.paths,
+        vec![std::path::PathBuf::from("/home/user/documents")]
+    );
+    assert_eq!(
+        job.exclude_patterns,
+        Some(vec!["*.tmp".to_string(), ".cache/**".to_string()])
+    );
+    assert!(job.exclude_file.is_none());
+    assert_eq!(job.schedule.as_deref(), Some("0 2 * * *"));
+
+    let retention = job.retention.as_ref().unwrap();
+    assert_eq!(retention.keep_daily, Some(7));
+    assert_eq!(retention.keep_weekly, Some(4));
+    assert_eq!(retention.keep_monthly, Some(6));
+    // Not set in the YAML; documents the field's default (see
+    // default_keep_last() in src/config.rs) rather than leaving it unasserted.
+    assert_eq!(retention.keep_last, Some(3));
+
+    assert!(job.notifications.on_failure);
+    assert!(!job.notifications.on_success);
+
+    assert_eq!(job.pre_backup.len(), 1);
+    match &job.pre_backup[0] {
+        Hook::Command {
+            command,
+            args,
+            continue_on_error,
+        } => {
+            assert_eq!(command, "/usr/local/bin/db-dump.sh");
+            assert!(args.is_empty());
+            assert!(!continue_on_error);
+        }
+        _ => panic!("Expected Command hook"),
+    }
+    assert!(job.post_backup.is_empty());
+}
+
+/// Regression test for the secrets.yaml example in README.md's Quick Start.
+#[test]
+fn test_readme_quick_start_secrets_example_is_valid() {
+    let yaml = r#"
+restic-password: your-secret-password
+telegram:
+  bot_token: your-bot-token
+  chat_id: your-chat-id
+"#;
+    let secrets: Secrets = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(secrets.get("restic-password"), Some("your-secret-password"));
+    let telegram = secrets.telegram.unwrap();
+    assert_eq!(telegram.bot_token.as_deref(), Some("your-bot-token"));
+    assert_eq!(telegram.chat_id.as_deref(), Some("your-chat-id"));
+}

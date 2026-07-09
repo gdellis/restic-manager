@@ -82,17 +82,22 @@ jobs:
     repository: local
     paths:
       - /home/user/documents
-    exclude:
+    exclude_patterns:
       - "*.tmp"
       - ".cache/**"
     schedule: "0 2 * * *"  # 2 AM daily
     retention:
-      keep-daily: 7
-      keep-weekly: 4
-      keep-monthly: 6
+      keep_daily: 7
+      keep_weekly: 4
+      keep_monthly: 6
     notifications:
       on_failure: true
       on_success: false
+    pre_backup:
+      - type: Command
+        command: /usr/local/bin/db-dump.sh
+        args: []
+        continue_on_error: false  # abort the backup if this hook fails (default)
 ```
 
 Create `~/.config/restic-manager/secrets.yaml` (gitignored):
@@ -145,18 +150,20 @@ restic-manager init local
 
 ### config.yaml
 
-| Field                            | Description                                 |
-| -------------------------------- | ------------------------------------------- |
-| `repositories.<name>.repo`         | Restic repository path                      |
+| Field | Description |
+| --- | --- |
+| `repositories.<name>.repo` | Restic repository path |
 | `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
-| `jobs.<name>.repository`           | Repository name to use                      |
-| `jobs.<name>.paths`                | List of paths to backup                    |
-| `jobs.<name>.exclude`              | Patterns to exclude                         |
-| `jobs.<name>.schedule`             | Cron expression for scheduling             |
-| `jobs.<name>.retention`            | Snapshot retention policy                   |
-| `jobs.<name>.notifications`        | Notification preferences                    |
-| `jobs.<name>.pre_backup`           | Commands to run before backup               |
-| `jobs.<name>.post_backup`          | Commands to run after backup                |
+| `jobs.<name>.repository` | Repository name to use |
+| `jobs.<name>.paths` | List of paths to backup |
+| `jobs.<name>.exclude_patterns` | List of exclude patterns, written to a per-job exclude file |
+| `jobs.<name>.exclude_file` | Path to an existing exclude file; takes precedence over `exclude_patterns` |
+| `jobs.<name>.schedule` | Cron expression for scheduling |
+| `jobs.<name>.retention` | `keep_daily`/`keep_weekly`/`keep_monthly`/`keep_yearly`/`keep_hourly`/`keep_last` |
+| `jobs.<name>.notifications` | `on_failure`/`on_success` |
+| `jobs.<name>.pre_backup` | Hooks to run before backup (skipped in `--dry-run`) |
+| `jobs.<name>.post_backup` | Hooks to run after backup (skipped in `--dry-run`) |
+|   ↳ hook `continue_on_error` | If `true`, a failed hook warns instead of aborting the backup |
 
 ### secrets.yaml
 
