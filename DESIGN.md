@@ -178,18 +178,12 @@ erDiagram
     JOB ||--o{ HOOK : post_backup
     SECRETS ||--o{ TELEGRAM : has
 
-    CONFIG {
-        string version
-    }
-
     REPOSITORY {
-        string name
         string repo
         string password_key
     }
 
     JOB {
-        string name
         string repository
         list paths
         list exclude_patterns

@@ -198,10 +198,13 @@ fn test_secrets_empty_telegram() {
 
 /// Regression test for the config.yaml example in README.md's Quick Start
 /// section: parses the exact YAML shown there and asserts every field
-/// actually landed where the doc claims, so a future field rename can't
-/// silently make the example wrong again (serde ignores unknown keys by
-/// default, so a typo'd field name would otherwise fail silently, not
-/// with a deserialization error).
+/// actually landed where the doc claims. This catches a documented field
+/// being removed or renamed on the underlying struct (the assertion on
+/// that field would fail to compile or fail at runtime). It does NOT
+/// catch the opposite drift - a new key added to the YAML example that
+/// doesn't exist on the struct - since neither Config nor Job sets
+/// `deny_unknown_fields`, so serde silently drops unknown keys rather
+/// than erroring.
 #[test]
 fn test_readme_quick_start_config_example_is_valid() {
     let yaml = r#"
@@ -237,6 +240,7 @@ jobs:
     let repo = &config.repositories["local"];
     assert_eq!(repo.repo, "/backup/my-repo");
     assert_eq!(repo.password_key, "restic-password");
+    assert!(repo.log_cli_output.is_none());
 
     let job = &config.jobs["documents"];
     assert_eq!(job.repository, "local");
@@ -248,6 +252,7 @@ jobs:
         job.exclude_patterns,
         Some(vec!["*.tmp".to_string(), ".cache/**".to_string()])
     );
+    assert!(job.exclude_file.is_none());
     assert_eq!(job.schedule.as_deref(), Some("0 2 * * *"));
 
     let retention = job.retention.as_ref().unwrap();
@@ -271,6 +276,7 @@ jobs:
         }
         _ => panic!("Expected Command hook"),
     }
+    assert!(job.post_backup.is_empty());
 }
 
 /// Regression test for the secrets.yaml example in README.md's Quick Start.

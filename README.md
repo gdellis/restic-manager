@@ -163,7 +163,7 @@ restic-manager init local
 | `jobs.<name>.notifications` | `on_failure`/`on_success` |
 | `jobs.<name>.pre_backup` | Hooks to run before backup (skipped in `--dry-run`) |
 | `jobs.<name>.post_backup` | Hooks to run after backup (skipped in `--dry-run`) |
-| hook `continue_on_error` | If `true`, a failing hook warns and continues; default `false` aborts the backup |
+|   ↳ hook `continue_on_error` | If `true`, a failed hook warns instead of aborting the backup |
 
 ### secrets.yaml
 
