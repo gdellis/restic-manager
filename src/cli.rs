@@ -6,7 +6,6 @@ use crate::restore::Restore;
 use crate::scheduler::Scheduler;
 use crate::snapshot::SnapshotManager;
 use clap::{Parser, Subcommand};
-use tokio::signal;
 
 #[derive(Parser)]
 #[command(name = "restic-manager")]
@@ -124,14 +123,7 @@ pub fn cli_run() -> Result<(), AppError> {
         }
         Commands::Daemon => {
             let mut scheduler = Scheduler::new(config)?;
-            let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
-
-            tokio::spawn(async move {
-                signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
-                let _ = shutdown_tx.send(()).await;
-            });
-
-            scheduler.run(shutdown_rx)?;
+            scheduler.run()?;
         }
         Commands::Jobs => {
             let jobs = config.config.list_jobs();

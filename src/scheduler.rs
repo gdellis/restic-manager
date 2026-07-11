@@ -1,4 +1,5 @@
 use crate::backup::Backup;
+use crate::config::Job;
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::notifications::NotificationManager;
@@ -11,6 +12,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{error, info, warn};
@@ -99,12 +101,12 @@ impl Scheduler {
         }
     }
 
-    pub fn run(&mut self, shutdown_rx: mpsc::Receiver<()>) -> Result<(), AppError> {
+    pub fn run(&mut self) -> Result<(), AppError> {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(self.run_async(shutdown_rx))
+        rt.block_on(self.run_async())
     }
 
-    async fn run_async(&mut self, mut shutdown_rx: mpsc::Receiver<()>) -> Result<(), AppError> {
+    async fn run_async(&mut self) -> Result<(), AppError> {
         if self.jobs.is_empty() {
             info!("No scheduled jobs configured");
             return Ok(());
@@ -118,18 +120,15 @@ impl Scheduler {
         // after one full interval; consume it here so a job scheduled for
         // "every minute" doesn't get a spurious extra run right at startup.
         ticker.tick().await;
-        let mut shutdown_received = false;
         let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mut tasks = tokio::task::JoinSet::new();
 
         info!(job_count = self.jobs.len(), "Scheduler started");
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    if shutdown_received {
-                        continue;
-                    }
                     // with_second(0)/with_nanosecond(0) only return None when the
                     // *argument* is out of range (sec >= 60, nanos >= 2_000_000_000);
                     // chrono guarantees Local::now() itself never produces a value
@@ -150,136 +149,124 @@ impl Scheduler {
                     };
                     for (job_name, entry) in &self.jobs {
                         if Self::mark_if_due(&entry.schedule, now, &mut last_triggered, job_name) {
-                            let job_name = job_name.clone();
-                            if let Err(e) = tx.send(job_name).await {
+                            if let Err(e) = tx.send(job_name.clone()).await {
                                 warn!("Failed to queue job: {}", e);
                             }
                         }
                     }
                 }
 
-                job_name = rx.recv() => {
-                    match job_name {
-                        Some(name) => {
-                            {
-                                let mut running = in_flight.lock().unwrap();
-                                if !Self::try_start(&mut running, &name) {
-                                    warn!(job = %name, "Skipping trigger: job is already running");
-                                    continue;
-                                }
-                            }
-
-                            let config = self.config.clone();
-                            let job = config.config.get_job(&name).cloned();
-                            let in_flight = Arc::clone(&in_flight);
-                            tokio::spawn(async move {
-                                let _guard = InFlightGuard {
-                                    in_flight,
-                                    name: name.clone(),
-                                };
-
-                                info!(job = %name, "Starting scheduled backup");
-
-                                let notifier = job
-                                    .as_ref()
-                                    .map(|j| NotificationManager::new(&config, j.notifications.clone()));
-
-                                let blocking_name = name.clone();
-                                let join_result = tokio::task::spawn_blocking(move || {
-                                    Backup::run(&config, &blocking_name, false)
-                                })
-                                .await;
-
-                                match join_result {
-                                    Ok(Ok(result)) if result.partial => {
-                                        warn!(job = %name, snapshot = ?result.snapshot_id, errors_count = result.errors_count, "Backup completed with errors (partial)");
-                                        if let Some(ref n) = notifier {
-                                            let error_detail = if result.errors_count > 0 {
-                                                format!(
-                                                    "{} file(s) could not be read",
-                                                    result.errors_count
-                                                )
-                                            } else {
-                                                "some files could not be read".to_string()
-                                            };
-                                            // Best-effort: a Telegram outage here shouldn't fail
-                                            // the whole scheduled-run task (the backup itself
-                                            // already succeeded/partially succeeded), but log it
-                                            // so a real outage is still visible.
-                                            if let Err(e) = n
-                                                .notify_partial(
-                                                    &name,
-                                                    result.snapshot_id.as_deref(),
-                                                    &error_detail,
-                                                )
-                                                .await
-                                            {
-                                                warn!(job = %name, error = %e, "Failed to send partial-backup notification");
-                                            }
-                                        }
-                                    }
-                                    Ok(Ok(result)) => {
-                                        info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
-                                        if let Some(ref n) = notifier {
-                                            // Best-effort: see the partial-notification comment
-                                            // above for why send failures are logged, not
-                                            // propagated.
-                                            if let Err(e) = n
-                                                .notify_success(&name, result.snapshot_id.as_deref())
-                                                .await
-                                            {
-                                                warn!(job = %name, error = %e, "Failed to send success notification");
-                                            }
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        error!(job = %name, error = %e, "Backup failed");
-                                        if let Some(ref n) = notifier {
-                                            if let Err(notify_err) =
-                                                n.notify_failure(&name, &e.to_string()).await
-                                            {
-                                                warn!(job = %name, error = %notify_err, "Failed to send failure notification");
-                                            }
-                                        }
-                                    }
-                                    Err(join_err) => {
-                                        // join_result's Err only comes from the spawn_blocking
-                                        // closure above today (Notifications::new is sync and
-                                        // send_telegram only does a plain HTTP request, neither
-                                        // of which can panic), but this arm would also catch a
-                                        // panic anywhere else in this async block if one were
-                                        // ever introduced - that's intentional, not a bug.
-                                        error!(job = %name, error = %join_err, "Backup task panicked");
-                                        if let Some(ref n) = notifier {
-                                            if let Err(notify_err) = n
-                                                .notify_failure(
-                                                    &name,
-                                                    &format!("Backup task panicked: {}", join_err),
-                                                )
-                                                .await
-                                            {
-                                                warn!(job = %name, error = %notify_err, "Failed to send panic-failure notification");
-                                            }
-                                        }
-                                    }
-                                }
-                            });
+                Some(name) = rx.recv() => {
+                    {
+                        let mut running = in_flight.lock().unwrap();
+                        if !Self::try_start(&mut running, &name) {
+                            warn!(job = %name, "Skipping trigger: job is already running");
+                            continue;
                         }
-                        None => break,
                     }
+
+                    let config = self.config.clone();
+                    let job = config.config.get_job(&name).cloned();
+                    let in_flight = Arc::clone(&in_flight);
+                    tasks.spawn(Self::run_backup_job(config, job, name, in_flight));
                 }
 
-                _ = shutdown_rx.recv() => {
-                    if !shutdown_received {
-                        info!("Shutdown signal received, finishing current jobs");
-                        shutdown_received = true;
-                    }
+                _ = signal::ctrl_c() => {
+                    info!("Shutdown signal received, finishing current jobs");
+                    break;
                 }
+            }
+        }
+
+        // Drain in-flight backups so Ctrl+C doesn't cancel a running restic
+        // job mid-write and leave a stale repository lock behind.
+        while let Some(res) = tasks.join_next().await {
+            if let Err(join_err) = res {
+                error!(error = %join_err, "Backup task failed to join during shutdown");
             }
         }
 
         info!("Scheduler stopped");
         Ok(())
+    }
+
+    async fn run_backup_job(
+        config: ResolvedConfig,
+        job: Option<Job>,
+        name: String,
+        in_flight: Arc<Mutex<HashSet<String>>>,
+    ) {
+        let _guard = InFlightGuard {
+            in_flight,
+            name: name.clone(),
+        };
+
+        info!(job = %name, "Starting scheduled backup");
+
+        let notifier = job
+            .as_ref()
+            .map(|j| NotificationManager::new(&config, j.notifications.clone()));
+
+        let blocking_name = name.clone();
+        let join_result =
+            tokio::task::spawn_blocking(move || Backup::run(&config, &blocking_name, false)).await;
+
+        match join_result {
+            Ok(Ok(result)) if result.partial => {
+                warn!(job = %name, snapshot = ?result.snapshot_id, errors_count = result.errors_count, "Backup completed with errors (partial)");
+                if let Some(ref n) = notifier {
+                    let error_detail = if result.errors_count > 0 {
+                        format!("{} file(s) could not be read", result.errors_count)
+                    } else {
+                        "some files could not be read".to_string()
+                    };
+                    // Best-effort: a Telegram outage here shouldn't fail the whole
+                    // scheduled-run task (the backup itself already
+                    // succeeded/partially succeeded), but log it so a real outage
+                    // is still visible.
+                    if let Err(e) = n
+                        .notify_partial(&name, result.snapshot_id.as_deref(), &error_detail)
+                        .await
+                    {
+                        warn!(job = %name, error = %e, "Failed to send partial-backup notification");
+                    }
+                }
+            }
+            Ok(Ok(result)) => {
+                info!(job = %name, snapshot = ?result.snapshot_id, "Backup completed");
+                if let Some(ref n) = notifier {
+                    // Best-effort: see the partial-notification comment above for
+                    // why send failures are logged, not propagated.
+                    if let Err(e) = n.notify_success(&name, result.snapshot_id.as_deref()).await {
+                        warn!(job = %name, error = %e, "Failed to send success notification");
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                error!(job = %name, error = %e, "Backup failed");
+                if let Some(ref n) = notifier {
+                    if let Err(notify_err) = n.notify_failure(&name, &e.to_string()).await {
+                        warn!(job = %name, error = %notify_err, "Failed to send failure notification");
+                    }
+                }
+            }
+            Err(join_err) => {
+                // join_result's Err only comes from the spawn_blocking closure
+                // above today (Notifications::new is sync and send_telegram only
+                // does a plain HTTP request, neither of which can panic), but this
+                // arm would also catch a panic anywhere else in this async block if
+                // one were ever introduced - that's intentional, not a bug.
+                error!(job = %name, error = %join_err, "Backup task panicked");
+                if let Some(ref n) = notifier {
+                    if let Err(notify_err) = n
+                        .notify_failure(&name, &format!("Backup task panicked: {}", join_err))
+                        .await
+                    {
+                        warn!(job = %name, error = %notify_err, "Failed to send panic-failure notification");
+                    }
+                }
+            }
+        }
     }
 
     pub fn list_scheduled_jobs(&self) -> Vec<(&str, String)> {
