@@ -237,10 +237,7 @@ impl Scheduler {
                 if let Some(ref n) = notifier {
                     // Best-effort: see the partial-notification comment above for
                     // why send failures are logged, not propagated.
-                    if let Err(e) = n
-                        .notify_success(&name, result.snapshot_id.as_deref())
-                        .await
-                    {
+                    if let Err(e) = n.notify_success(&name, result.snapshot_id.as_deref()).await {
                         warn!(job = %name, error = %e, "Failed to send success notification");
                     }
                 }

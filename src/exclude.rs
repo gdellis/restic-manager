@@ -89,9 +89,7 @@ pub fn resolve_exclude_file(job: &crate::config::Job, job_name: &str) -> Option<
         }
     }
 
-    exclude_file_path()
-        .ok()
-        .and_then(|p| if p.exists() { Some(p) } else { None })
+    exclude_file_path().ok().filter(|p| p.exists())
 }
 
 #[cfg(test)]
