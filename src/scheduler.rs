@@ -158,8 +158,10 @@ impl Scheduler {
         let (tx, mut rx) = mpsc::channel::<String>(100);
 
         // Cron granularity is one minute, so tick every 60s by default. The
-        // env override exists for integration tests, which otherwise would
-        // have to wait out a real minute boundary to see a job trigger.
+        // env override exists solely for the integration tests, which
+        // otherwise would have to wait out a real minute boundary to see a
+        // job trigger. It is NOT a stable public interface: don't set it in
+        // production, and it may change or disappear without notice.
         let tick_interval = std::env::var("RESTIC_MANAGER_TICK_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -247,6 +249,10 @@ impl Scheduler {
         // as a conventional "interrupted" exit code for either signal.
         let force_exit = Self::shutdown_signal();
         tokio::pin!(force_exit);
+        // Logged only after the force-exit handler is armed, mirroring the
+        // "Scheduler started" ordering above; the integration test keys off
+        // this line before sending the second signal.
+        info!("Draining in-flight jobs; a second signal force-exits");
         loop {
             tokio::select! {
                 res = tasks.join_next() => match res {
@@ -258,6 +264,11 @@ impl Scheduler {
                 },
                 _ = &mut force_exit => {
                     warn!("Second shutdown signal received, exiting without waiting for in-flight jobs");
+                    // process::exit skips destructors, so flush explicitly:
+                    // the warn line above must not be lost if the log writer
+                    // ever becomes buffered.
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
                     std::process::exit(130);
                 }
             }

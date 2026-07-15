@@ -216,12 +216,11 @@ jobs:
     daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
 
     // First signal: enters the drain, which now waits on the in-flight
-    // Wait hook.
+    // Wait hook. The "Draining" line is logged only after the drain's
+    // force-exit handler is armed, so waiting for it (rather than a fixed
+    // sleep) makes the second signal race-free.
     daemon.sigterm();
-    daemon.wait_for_log("Shutdown signal received", Duration::from_secs(10));
-    // Tiny grace so the drain's force-exit signal stream (registered just
-    // after that log line) is armed before the second signal.
-    std::thread::sleep(Duration::from_millis(300));
+    daemon.wait_for_log("Draining in-flight jobs", Duration::from_secs(10));
 
     // Second signal: force-exit with the conventional "interrupted" code
     // instead of waiting out the 300s hook.
@@ -239,6 +238,67 @@ jobs:
     assert!(
         stderr.contains("Second shutdown signal received"),
         "expected force-exit log on stderr; got:\n{}",
+        stderr
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn daemon_drain_waits_for_in_flight_backup() {
+    // Companion to the force-exit test: a single SIGTERM must make the
+    // drain actually WAIT for the in-flight job (here a 5s Wait hook)
+    // rather than detaching it, and then exit 0. Exit stays 0 even though
+    // the backup itself fails afterwards on the nonexistent repo - drain
+    // failures are deliberately log-only.
+    let tmp = scratch_config(
+        "drain-wait",
+        r#"
+repositories:
+  test:
+    repo: /nonexistent/repo
+    password_key: test_pass
+jobs:
+  slow:
+    repository: test
+    paths:
+      - /nonexistent/path
+    schedule: "* * * * *"
+    pre_backup:
+      - type: Wait
+        seconds: 5
+"#,
+        Some("test_pass: dummy\n"),
+    );
+
+    let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TICK_SECS", "1")]);
+
+    daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
+    let job_started = Instant::now();
+
+    daemon.sigterm();
+    let status = daemon.wait_for_exit(Duration::from_secs(20));
+    let waited = job_started.elapsed();
+    let stderr = daemon.stderr();
+
+    assert!(
+        status.success(),
+        "daemon exited with {:?}; stderr:\n{}",
+        status,
+        stderr
+    );
+    // 4s rather than the hook's full 5s to allow for the delay between
+    // the job actually starting and the test observing its log line.
+    assert!(
+        waited >= Duration::from_secs(4),
+        "daemon exited after {:?}, before the in-flight 5s hook could have \
+         finished - the drain did not wait; stderr:\n{}",
+        waited,
+        stderr
+    );
+    assert!(
+        stderr.contains("Shutdown signal received") && stderr.contains("Scheduler stopped"),
+        "expected graceful drain logs on stderr; got:\n{}",
         stderr
     );
 

@@ -162,6 +162,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now restic-manager
 ```
 
+The unit's `ExecStart=` assumes the binary is at `/usr/local/bin/restic-manager`; if
+`which restic-manager` says otherwise, adjust the path in the unit first — a wrong path fails
+the service on start until the start limit stops the retries.
+
 User-level (runs as your user, config read from `~/.config/restic-manager`):
 
 ```bash
