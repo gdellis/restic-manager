@@ -135,7 +135,8 @@ restic-manager check documents
 # Prune old snapshots
 restic-manager prune documents
 
-# Start scheduler daemon
+# Start the scheduler daemon (runs in the foreground; see
+# "Running as a systemd service" below to run it in the background)
 restic-manager daemon
 
 # List configured jobs and repositories
@@ -145,6 +146,42 @@ restic-manager repos
 # Initialize a new repository
 restic-manager init local
 ```
+
+### Running as a systemd service
+
+`restic-manager daemon` intentionally runs in the foreground and does not fork into the
+background — that is the correct shape for a modern service manager, which handles
+backgrounding, restarts, and logging for you. Unit files for both system-level and user-level
+operation ship in [`contrib/systemd/`](contrib/systemd/).
+
+System-level (runs as root, or uncomment `User=` in the unit):
+
+```bash
+sudo cp contrib/systemd/restic-manager.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now restic-manager
+```
+
+User-level (runs as your user, config read from `~/.config/restic-manager`):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/restic-manager.user.service ~/.config/systemd/user/restic-manager.service
+systemctl --user daemon-reload
+systemctl --user enable --now restic-manager
+
+# Start at boot without requiring a login session:
+loginctl enable-linger $USER
+```
+
+Logs go to the journal (`journalctl -u restic-manager -f`, or `journalctl --user -u
+restic-manager -f` for the user unit). Set `RUST_LOG` (e.g. `Environment=RUST_LOG=debug` in the
+unit) to change verbosity.
+
+On shutdown (`systemctl stop`, which sends SIGTERM) the daemon stops scheduling new jobs and
+waits for in-flight backups to finish before exiting, so a running restic job is never killed
+mid-write. The shipped units use `KillMode=mixed` and a generous `TimeoutStopSec` to preserve
+that behavior — see the comments in the unit files.
 
 ## Configuration Reference
 

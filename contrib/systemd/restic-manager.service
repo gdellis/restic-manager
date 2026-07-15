@@ -1,0 +1,47 @@
+# System-level unit for the restic-manager scheduler daemon.
+#
+# Install:
+#   sudo cp contrib/systemd/restic-manager.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now restic-manager
+#
+# Logs: journalctl -u restic-manager -f
+
+[Unit]
+Description=restic-manager backup scheduler
+Documentation=https://github.com/gdellis/restic-manager
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/restic-manager daemon
+Restart=on-failure
+RestartSec=30
+# Config is read from $HOME/.config/restic-manager (or $XDG_CONFIG_HOME).
+# Uncomment to run as a dedicated user instead of root:
+#User=backup
+#Environment=RUST_LOG=info
+
+# SIGTERM triggers a graceful drain of in-flight backups. KillMode=mixed
+# matters here: the default (control-group) would SIGTERM the restic child
+# processes directly, defeating the drain. TimeoutStopSec is generous
+# because backups can run long; SIGKILL hits the whole cgroup only after
+# the timeout expires.
+KillMode=mixed
+TimeoutStopSec=2h
+
+# Moderate hardening only — a backup tool needs broad filesystem read
+# access and repositories can live anywhere, so ProtectSystem=strict and
+# ProtectHome are deliberately not used.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

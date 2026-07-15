@@ -1,0 +1,29 @@
+# User-level unit for the restic-manager scheduler daemon.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/restic-manager.user.service \
+#      ~/.config/systemd/user/restic-manager.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now restic-manager
+#
+# To start at boot without logging in: loginctl enable-linger $USER
+# Logs: journalctl --user -u restic-manager -f
+
+[Unit]
+Description=restic-manager backup scheduler
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/restic-manager daemon
+Restart=on-failure
+RestartSec=30
+#Environment=RUST_LOG=info
+
+# SIGTERM triggers a graceful drain of in-flight backups; see the comments
+# in the system-level unit for why KillMode=mixed and the long stop timeout.
+KillMode=mixed
+TimeoutStopSec=2h
+
+[Install]
+WantedBy=default.target

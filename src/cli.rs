@@ -58,6 +58,17 @@ pub enum Commands {
 }
 
 pub fn cli_run() -> Result<(), AppError> {
+    // Logs go to stderr so command output on stdout stays clean; under
+    // systemd both streams land in the journal. RUST_LOG overrides the
+    // default `info` level.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     let config = ResolvedConfig::load()?;
 

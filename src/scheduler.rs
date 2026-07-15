@@ -106,6 +106,35 @@ impl Scheduler {
         rt.block_on(self.run_async())
     }
 
+    /// Resolves when a shutdown signal arrives: Ctrl-C on all platforms,
+    /// plus SIGTERM on unix so `systemctl stop` triggers the same graceful
+    /// drain of in-flight backups instead of killing the process outright.
+    #[cfg(unix)]
+    async fn shutdown_signal() {
+        use tokio::signal::unix::{signal as unix_signal, SignalKind};
+        match unix_signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => tokio::select! {
+                res = signal::ctrl_c() => if let Err(e) = res {
+                    error!(error = %e, "Failed to listen for Ctrl-C");
+                },
+                _ = sigterm.recv() => {}
+            },
+            Err(e) => {
+                error!(error = %e, "Failed to install SIGTERM handler; Ctrl-C only");
+                if let Err(e) = signal::ctrl_c().await {
+                    error!(error = %e, "Failed to listen for Ctrl-C");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn shutdown_signal() {
+        if let Err(e) = signal::ctrl_c().await {
+            error!(error = %e, "Failed to listen for Ctrl-C");
+        }
+    }
+
     async fn run_async(&mut self) -> Result<(), AppError> {
         if self.jobs.is_empty() {
             info!("No scheduled jobs configured");
@@ -125,6 +154,11 @@ impl Scheduler {
         let mut tasks = tokio::task::JoinSet::new();
 
         info!(job_count = self.jobs.len(), "Scheduler started");
+
+        // Created once outside the loop so the SIGTERM stream isn't
+        // re-registered on every select iteration.
+        let shutdown = Self::shutdown_signal();
+        tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
@@ -171,15 +205,16 @@ impl Scheduler {
                     tasks.spawn(Self::run_backup_job(config, job, name, in_flight));
                 }
 
-                _ = signal::ctrl_c() => {
+                _ = &mut shutdown => {
                     info!("Shutdown signal received, finishing current jobs");
                     break;
                 }
             }
         }
 
-        // Drain in-flight backups so Ctrl+C doesn't cancel a running restic
-        // job mid-write and leave a stale repository lock behind.
+        // Drain in-flight backups so Ctrl+C or SIGTERM doesn't cancel a
+        // running restic job mid-write and leave a stale repository lock
+        // behind.
         while let Some(res) = tasks.join_next().await {
             if let Err(join_err) = res {
                 error!(error = %join_err, "Backup task failed to join during shutdown");

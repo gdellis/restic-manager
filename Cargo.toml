@@ -13,7 +13,6 @@ chrono = { version = "0.4", features = ["serde"] }
 cron = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "2"
 dirs = "6"
