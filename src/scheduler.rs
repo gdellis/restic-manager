@@ -112,6 +112,12 @@ impl Scheduler {
     /// killing the process outright. A plain fn returning a future (not an
     /// `async fn`) so the SIGTERM handler is installed at call time, before
     /// the caller logs that it is ready, rather than lazily on first poll.
+    ///
+    /// Note: `tokio::signal::ctrl_c()` is process-global — the main-loop
+    /// future and the drain-phase `force_exit` future share one underlying
+    /// handler. That's sound while the two are created sequentially in a
+    /// single scheduler run, but a refactor toward concurrent callers would
+    /// need to route signals through one shared subscription instead.
     #[cfg(unix)]
     fn shutdown_signal() -> impl std::future::Future<Output = ()> {
         use tokio::signal::unix::{signal as unix_signal, SignalKind};
@@ -151,7 +157,15 @@ impl Scheduler {
 
         let (tx, mut rx) = mpsc::channel::<String>(100);
 
-        let tick_interval = Duration::from_secs(60);
+        // Cron granularity is one minute, so tick every 60s by default. The
+        // env override exists for integration tests, which otherwise would
+        // have to wait out a real minute boundary to see a job trigger.
+        let tick_interval = std::env::var("RESTIC_MANAGER_TICK_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(60));
         let mut ticker = interval(tick_interval);
         // tokio::time::interval fires its first tick immediately rather than
         // after one full interval; consume it here so a job scheduled for
@@ -229,8 +243,8 @@ impl Scheduler {
         // remaining tasks, and per-job failures were already reported via
         // notifications. A second signal during the drain force-exits
         // immediately so an operator isn't held hostage by a long backup,
-        // at the cost of possibly leaving a stale restic lock (130 = exit
-        // code for death by SIGINT, the conventional "interrupted" code).
+        // at the cost of possibly leaving a stale restic lock. 130 is used
+        // as a conventional "interrupted" exit code for either signal.
         let force_exit = Self::shutdown_signal();
         tokio::pin!(force_exit);
         loop {

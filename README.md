@@ -179,6 +179,10 @@ restic-manager -f` for the user unit). Set `RUST_LOG` in the unit's `Environment
 verbosity; the default `info` is right for normal operation. Avoid `debug`/`trace` on shared
 hosts — those levels can write backup paths and restic command details into the journal.
 
+If the daemon fails to start 5 times within 5 minutes (for example, a broken config), systemd
+stops retrying and the service stays down — check `journalctl -u restic-manager -n 200` and
+`systemctl reset-failed restic-manager` after fixing the cause.
+
 On shutdown (`systemctl stop`, which sends SIGTERM) the daemon stops scheduling new jobs and
 waits for in-flight backups to finish before exiting, so a running restic job is never killed
 mid-write. The shipped units use `KillMode=mixed` and a generous `TimeoutStopSec` to preserve

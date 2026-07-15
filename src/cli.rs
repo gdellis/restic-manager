@@ -45,7 +45,13 @@ pub enum Commands {
     Check { name: String },
     #[command(about = "Unlock repository for a job")]
     Unlock { name: String },
-    #[command(about = "Run the scheduler daemon")]
+    #[command(
+        about = "Run the scheduler daemon",
+        long_about = "Run the scheduler daemon in the foreground. SIGINT (Ctrl-C) or SIGTERM \
+                      stops scheduling and drains in-flight backups before exiting; a second \
+                      signal during the drain force-exits immediately (exit code 130). See the \
+                      README section \"Running as a systemd service\" for production use."
+    )]
     Daemon,
     #[command(about = "List all jobs")]
     Jobs,
