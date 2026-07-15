@@ -175,8 +175,9 @@ loginctl enable-linger $USER
 ```
 
 Logs go to the journal (`journalctl -u restic-manager -f`, or `journalctl --user -u
-restic-manager -f` for the user unit). Set `RUST_LOG` (e.g. `Environment=RUST_LOG=debug` in the
-unit) to change verbosity.
+restic-manager -f` for the user unit). Set `RUST_LOG` in the unit's `Environment=` to change
+verbosity; the default `info` is right for normal operation. Avoid `debug`/`trace` on shared
+hosts — those levels can write backup paths and restic command details into the journal.
 
 On shutdown (`systemctl stop`, which sends SIGTERM) the daemon stops scheduling new jobs and
 waits for in-flight backups to finish before exiting, so a running restic job is never killed

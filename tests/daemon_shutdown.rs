@@ -6,8 +6,9 @@
 //! XDG_CONFIG_HOME, which `dirs::config_dir()` only honors on Linux.
 #![cfg(target_os = "linux")]
 
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -44,9 +45,42 @@ jobs:
         .spawn()
         .unwrap();
 
-    // Give the daemon time to install its signal handlers and start the
-    // scheduler loop before we signal it.
-    std::thread::sleep(Duration::from_secs(2));
+    // Collect stderr on a reader thread so we can both watch for the
+    // startup line while the daemon runs and assert on the full output
+    // after it exits.
+    let collected = Arc::new(Mutex::new(String::new()));
+    let reader = {
+        let collected = Arc::clone(&collected);
+        let stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let mut buf = collected.lock().unwrap();
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        })
+    };
+
+    // The daemon logs "Scheduler started" only after its shutdown-signal
+    // handlers are installed, so waiting for that line (instead of a
+    // fixed sleep) makes it safe to signal even on a slow CI runner.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if collected.lock().unwrap().contains("Scheduler started") {
+            break;
+        }
+        if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().ok();
+            reader.join().unwrap();
+            panic!(
+                "daemon did not reach 'Scheduler started'; stderr:\n{}",
+                collected.lock().unwrap()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     let sigterm = Command::new("kill")
         .arg(child.id().to_string())
@@ -67,15 +101,8 @@ jobs:
         std::thread::sleep(Duration::from_millis(100));
     };
 
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-
-    std::fs::remove_dir_all(&tmp).ok();
+    reader.join().unwrap();
+    let stderr = collected.lock().unwrap().clone();
 
     assert!(
         status.success(),
@@ -88,4 +115,8 @@ jobs:
         "expected graceful shutdown log on stderr; got:\n{}",
         stderr
     );
+
+    // Cleanup only after the assertions so a failure leaves the scratch
+    // config behind for debugging.
+    std::fs::remove_dir_all(&tmp).ok();
 }

@@ -12,6 +12,10 @@ Description=restic-manager backup scheduler
 Documentation=https://github.com/gdellis/restic-manager
 Wants=network-online.target
 After=network-online.target
+# Stop restarting if the daemon fails 5 times within 5 minutes (e.g. a
+# broken config) instead of relaunching it every RestartSec forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
