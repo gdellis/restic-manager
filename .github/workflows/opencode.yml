@@ -23,6 +23,11 @@ on:
         required: false
         type: boolean
         default: true
+      timeout_minutes:
+        description: 'Per-attempt timeout for the OpenCode step (a hung attempt is retried once)'
+        required: false
+        type: number
+        default: 15
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -30,7 +35,8 @@ env:
 jobs:
   opencode:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Two timeout_minutes attempts (see below) plus checkout/setup margin.
+    timeout-minutes: 35
     # No permissions: block here - a reusable workflow's job permissions
     # must be a subset of what its caller grants, or the run fails at
     # startup. Deferring to the caller (pr_commet.yml grants broad write
@@ -44,7 +50,30 @@ jobs:
           persist-credentials: true
           fetch-depth: ${{ inputs.include_pr_context && 0 || 1 }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      # Retry-once pattern: the first attempt gets a per-step timeout and
+      # continue-on-error so a hang or transient backend failure doesn't
+      # fail the job; the second attempt runs only if the first one failed
+      # (a timed-out step reports outcome == 'failure' too) and, having no
+      # continue-on-error, fails the job for real if it also fails. Caveat:
+      # if attempt 1 dies after already posting its review comment, the
+      # retry can post a duplicate - acceptable, since posting is the
+      # action's final act and the common hang is the model call before it.
       - name: Run OpenCode
+        id: opencode
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        uses: anomalyco/opencode/github@a948b1c539c6324beebc016a8503d3bf4fce5e97 # v1.14.17
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLLAMA_API_KEY: ${{ secrets.api_key }}
+          OLLAMA_CONTEXT_LENGTH: 64000
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ inputs.prompt }}
+          use_github_token: true
+      - name: Retry OpenCode (once, after failure or timeout)
+        if: steps.opencode.outcome == 'failure'
+        timeout-minutes: ${{ inputs.timeout_minutes }}
         uses: anomalyco/opencode/github@a948b1c539c6324beebc016a8503d3bf4fce5e97 # v1.14.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
