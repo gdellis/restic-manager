@@ -106,6 +106,49 @@ impl Scheduler {
         rt.block_on(self.run_async())
     }
 
+    /// Returns a future that resolves when a shutdown signal arrives:
+    /// Ctrl-C on all platforms, plus SIGTERM on unix so `systemctl stop`
+    /// triggers the same graceful drain of in-flight backups instead of
+    /// killing the process outright. A plain fn returning a future (not an
+    /// `async fn`) so the SIGTERM handler is installed at call time, before
+    /// the caller logs that it is ready, rather than lazily on first poll.
+    ///
+    /// Note: `tokio::signal::ctrl_c()` is process-global — the main-loop
+    /// future and the drain-phase `force_exit` future share one underlying
+    /// handler. That's sound while the two are created sequentially in a
+    /// single scheduler run, but a refactor toward concurrent callers would
+    /// need to route signals through one shared subscription instead.
+    #[cfg(unix)]
+    fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+        use tokio::signal::unix::{signal as unix_signal, SignalKind};
+        let sigterm = unix_signal(SignalKind::terminate());
+        async move {
+            match sigterm {
+                Ok(mut sigterm) => tokio::select! {
+                    res = signal::ctrl_c() => if let Err(e) = res {
+                        error!(error = %e, "Failed to listen for Ctrl-C");
+                    },
+                    _ = sigterm.recv() => {}
+                },
+                Err(e) => {
+                    error!(error = %e, "Failed to install SIGTERM handler; Ctrl-C only");
+                    if let Err(e) = signal::ctrl_c().await {
+                        error!(error = %e, "Failed to listen for Ctrl-C");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+        async {
+            if let Err(e) = signal::ctrl_c().await {
+                error!(error = %e, "Failed to listen for Ctrl-C");
+            }
+        }
+    }
+
     async fn run_async(&mut self) -> Result<(), AppError> {
         if self.jobs.is_empty() {
             info!("No scheduled jobs configured");
@@ -114,7 +157,17 @@ impl Scheduler {
 
         let (tx, mut rx) = mpsc::channel::<String>(100);
 
-        let tick_interval = Duration::from_secs(60);
+        // Cron granularity is one minute, so tick every 60s by default. The
+        // env override exists solely for the integration tests, which
+        // otherwise would have to wait out a real minute boundary to see a
+        // job trigger. It is NOT a stable public interface: don't set it in
+        // production, and it may change or disappear without notice.
+        let tick_interval = std::env::var("RESTIC_MANAGER_TICK_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(60));
         let mut ticker = interval(tick_interval);
         // tokio::time::interval fires its first tick immediately rather than
         // after one full interval; consume it here so a job scheduled for
@@ -123,6 +176,13 @@ impl Scheduler {
         let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let mut tasks = tokio::task::JoinSet::new();
+
+        // Created once outside the loop so the SIGTERM stream isn't
+        // re-registered on every select iteration, and before the
+        // "Scheduler started" log so that line reliably means signals are
+        // being handled (the integration test depends on that ordering).
+        let shutdown = Self::shutdown_signal();
+        tokio::pin!(shutdown);
 
         info!(job_count = self.jobs.len(), "Scheduler started");
 
@@ -171,18 +231,46 @@ impl Scheduler {
                     tasks.spawn(Self::run_backup_job(config, job, name, in_flight));
                 }
 
-                _ = signal::ctrl_c() => {
+                _ = &mut shutdown => {
                     info!("Shutdown signal received, finishing current jobs");
                     break;
                 }
             }
         }
 
-        // Drain in-flight backups so Ctrl+C doesn't cancel a running restic
-        // job mid-write and leave a stale repository lock behind.
-        while let Some(res) = tasks.join_next().await {
-            if let Err(join_err) = res {
-                error!(error = %join_err, "Backup task failed to join during shutdown");
+        // Drain in-flight backups so Ctrl+C or SIGTERM doesn't cancel a
+        // running restic job mid-write and leave a stale repository lock
+        // behind. Join errors (a panicked backup task) are deliberately
+        // degraded to logs here: the drain must keep waiting on the
+        // remaining tasks, and per-job failures were already reported via
+        // notifications. A second signal during the drain force-exits
+        // immediately so an operator isn't held hostage by a long backup,
+        // at the cost of possibly leaving a stale restic lock. 130 is used
+        // as a conventional "interrupted" exit code for either signal.
+        let force_exit = Self::shutdown_signal();
+        tokio::pin!(force_exit);
+        // Logged only after the force-exit handler is armed, mirroring the
+        // "Scheduler started" ordering above; the integration test keys off
+        // this line before sending the second signal.
+        info!("Draining in-flight jobs; a second signal force-exits");
+        loop {
+            tokio::select! {
+                res = tasks.join_next() => match res {
+                    None => break,
+                    Some(Err(join_err)) => {
+                        error!(error = %join_err, "Backup task failed to join during shutdown");
+                    }
+                    Some(Ok(())) => {}
+                },
+                _ = &mut force_exit => {
+                    warn!("Second shutdown signal received, exiting without waiting for in-flight jobs");
+                    // process::exit skips destructors, so flush explicitly:
+                    // the warn line above must not be lost if the log writer
+                    // ever becomes buffered.
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                    std::process::exit(130);
+                }
             }
         }
 

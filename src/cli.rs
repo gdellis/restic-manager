@@ -45,7 +45,13 @@ pub enum Commands {
     Check { name: String },
     #[command(about = "Unlock repository for a job")]
     Unlock { name: String },
-    #[command(about = "Run the scheduler daemon")]
+    #[command(
+        about = "Run the scheduler daemon",
+        long_about = "Run the scheduler daemon in the foreground. SIGINT (Ctrl-C) or SIGTERM \
+                      stops scheduling and drains in-flight backups before exiting; a second \
+                      signal during the drain force-exits immediately (exit code 130). See the \
+                      README section \"Running as a systemd service\" for production use."
+    )]
     Daemon,
     #[command(about = "List all jobs")]
     Jobs,
@@ -58,6 +64,22 @@ pub enum Commands {
 }
 
 pub fn cli_run() -> Result<(), AppError> {
+    // Logs go to stderr so command output on stdout stays clean; under
+    // systemd both streams land in the journal. RUST_LOG overrides the
+    // default `info` level. ANSI colors only when stderr is a terminal,
+    // so journal/file output stays free of escape sequences. try_init
+    // rather than init so a second call (e.g. from a test harness) is a
+    // no-op instead of a panic.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .try_init()
+        .ok();
+
     let cli = Cli::parse();
     let config = ResolvedConfig::load()?;
 

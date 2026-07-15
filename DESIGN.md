@@ -236,7 +236,8 @@ restic-manager prune <job>      # Run prune with retention
 restic-manager list <job>       # List snapshots for job
 restic-manager check <job>      # Check repository integrity
 restic-manager unlock <job>     # Unlock stuck processes
-restic-manager daemon           # Run scheduler in foreground
+restic-manager daemon           # Run scheduler in foreground (systemd Type=simple friendly;
+                                # SIGTERM/Ctrl-C drain in-flight jobs before exit)
 restic-manager jobs             # List all configured jobs
 restic-manager repos            # List all configured repositories
 restic-manager init <repo>      # Initialize repository
@@ -355,7 +356,8 @@ warn (but don't fail) if the file is more permissive than that.
 - Parse cron expressions using `cron` crate
 - Tokio-based async scheduler
 - Job queue with concurrency control
-- Graceful shutdown handling
+- Graceful shutdown on SIGINT/Ctrl-C and (on unix) SIGTERM: stop scheduling, drain in-flight jobs
+- Runs in the foreground by design; systemd units in `contrib/systemd/` supervise it
 
 ### src/notifications.rs
 
@@ -370,8 +372,10 @@ warn (but don't fail) if the file is more permissive than that.
 - ConfigError, ResticError, NotificationError
 - Display impl for user-friendly messages
 
-Logging is not a dedicated module - it's set up inline via `tracing`/`tracing-subscriber` in
-`main.rs`/`cli.rs`, with no file rotation. A standalone `src/logging.rs` is **not yet implemented**.
+Logging is not a dedicated module - `tracing-subscriber` is initialized at the top of `cli_run()`
+in `cli.rs`, writing to stderr at `info` level by default (override with `RUST_LOG`). There is no
+file rotation; under systemd the journal owns log persistence. A standalone `src/logging.rs` is
+**not yet implemented**.
 
 ## Execution Flow
 
