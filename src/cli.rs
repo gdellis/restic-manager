@@ -70,11 +70,17 @@ pub fn cli_run() -> Result<(), AppError> {
     // so journal/file output stays free of escape sequences. try_init
     // rather than init so a second call (e.g. from a test harness) is a
     // no-op instead of a panic.
+    let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) if std::env::var_os("RUST_LOG").is_some() => {
+            eprintln!("Invalid RUST_LOG directive; using default 'info'");
+            tracing_subscriber::EnvFilter::new("info")
+        }
+        Err(_) => tracing_subscriber::EnvFilter::new("info"),
+    };
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()

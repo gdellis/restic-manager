@@ -168,7 +168,7 @@ impl Backup {
         }
 
         for path in paths {
-            args.push(path.to_str().unwrap_or(".").to_string());
+            args.push(path.to_string_lossy().to_string());
         }
 
         debug!("Executing: restic {}", args.join(" "));

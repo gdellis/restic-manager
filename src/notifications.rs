@@ -54,7 +54,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let message = format!("❌ Backup Failed: {}\n\nError: {}", job_name, error);
+        let message = format!("[FAILED] Backup Failed: {}\n\nError: {}", job_name, error);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(true);
@@ -81,7 +81,7 @@ impl Notifications {
 
         let snap = snapshot_id.unwrap_or("none");
         let message = format!(
-            "⚠️ Backup Partial: {}\n\nSnapshot: {}\nSome files could not be read: {}",
+            "[PARTIAL] Backup Partial: {}\n\nSnapshot: {}\nSome files could not be read: {}",
             job_name, snap, error
         );
 
@@ -105,9 +105,12 @@ impl Notifications {
         }
 
         let message = if let Some(snap) = snapshot_id {
-            format!("✅ Backup Success: {}\n\nSnapshot: {}", job_name, snap)
+            format!(
+                "[SUCCESS] Backup Success: {}\n\nSnapshot: {}",
+                job_name, snap
+            )
         } else {
-            format!("✅ Backup Success: {}", job_name)
+            format!("[SUCCESS] Backup Success: {}", job_name)
         };
 
         self.send_telegram(&message).await?;
