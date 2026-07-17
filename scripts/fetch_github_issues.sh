@@ -14,28 +14,39 @@ if ! command -v gh &>/dev/null; then
     exit 1
 fi
 
-if ! gh auth status &>/dev/null; then
+# Check gh auth status - let gh print its own diagnostic first
+if ! gh auth status; then
     echo "Error: Not authenticated with GitHub CLI. Please run 'gh auth login'" >&2
     exit 1
 fi
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Verify jq is available for JSON parsing
+if ! command -v jq &>/dev/null; then
+    echo "Error: jq not found. Please install jq from https://stedolan.github.io/jq/" >&2
+    exit 1
+fi
 
 echo "Fetching current issues from GitHub..."
 
 # Get open issues (no truncation - show all)
-OPEN_ISSUES=$(gh issue list --state open --json number,title,labels,url 2>&1 || echo "[]")
+if ! OPEN_ISSUES=$(gh issue list --state open --json number,title,labels,url 2>/dev/null); then
+    echo "Error: Failed to fetch open issues" >&2
+    exit 1
+fi
 
-# Get recently closed issues
-CLOSED_ISSUES=$(gh issue list --state closed --json number,title,labels --limit 50 2>&1 || echo "[]")
+# Get most recently closed issues (up to 50)
+if ! CLOSED_ISSUES=$(gh issue list --state closed --json number,title,labels --limit 50 2>/dev/null); then
+    echo "Error: Failed to fetch closed issues" >&2
+    exit 1
+fi
 
 echo ""
 echo "=== Open Issues ==="
-echo "$OPEN_ISSUES" | jq -r '.[] | "#\(.number): \(.title) [\(.labels | map(.name) | join(", "))]"' 2>/dev/null || echo "$OPEN_ISSUES"
+echo "$OPEN_ISSUES" | jq -r '.[] | "#\(.number): \(.title) [\(.labels | map(.name) | join(", "))]"'
 
 echo ""
-echo "=== Recently Closed Issues ==="
-echo "$CLOSED_ISSUES" | jq -r '.[] | "#\(.number): \(.title) [\(.labels | map(.name) | join(", "))]"' 2>/dev/null || echo "$CLOSED_ISSUES"
+echo "=== Recently Closed Issues (up to 50) ==="
+echo "$CLOSED_ISSUES" | jq -r '.[] | "#\(.number): \(.title) [\(.labels | map(.name) | join(", "))]"'
 
 echo ""
 echo "To update PROGRESS.md manually:"

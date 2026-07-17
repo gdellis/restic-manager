@@ -46,7 +46,7 @@
 
 ## Current Focus: Open Issues Triage
 
-*Last updated: 2026-07-17 - TODO: update this date when making changes*
+*Last updated: 2026-07-17*
 *Tracking: [GitHub Issues](https://github.com/gdellis/restic-manager/issues)*
 
 For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
@@ -60,7 +60,6 @@ For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 | #53 | Notifications: Unicode emoji may cause issues in non-UTF8 terminals | 🟡 Backlog | 30 min | — |
 
 **Goal**: Eliminate potential panics and improve debugging experience.
-**Estimated completion**: 1-2 hours
 
 ### Phase 2: Code Quality (Medium Priority)
 
@@ -71,7 +70,6 @@ For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 | #56 | Feature: Extend log_cli_output to check, prune, and forget commands | 🟡 Backlog | 1 hour | — |
 
 **Goal**: Improve code maintainability and developer experience.
-**Estimated completion**: ~2 hours
 
 ### Phase 3: Existing Work (Ongoing)
 
@@ -81,19 +79,21 @@ For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 | #45 | Feature: GUI component for managing backups | 🟢 Icebox | 1-2 weeks | — |
 
 **Goal**: Complete deferred polish and plan future features.
-**Estimated completion**: Ongoing
 
 ---
 
 ### Execution Plan
 
 #### Hour 1-2: Critical Fixes
+
 - Fix #54, #49, #53 (total ~1.5 hours)
 
 #### Hour 3-4: Code Quality
+
 - Complete #55, #46, #56 (total ~2 hours)
 
 #### Hour 5+: Testing & Planning
+
 - Complete #50 (2-3 hours)
 - Review #45 (design discussion)
 
@@ -101,6 +101,6 @@ For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 
 ## Notes
 
-- Config location: ~/.config/restic-manager/
-- All issues tracked on GitHub: https://github.com/gdellis/restic-manager/issues
+- Config location: `~/.config/restic-manager/`
+- All issues tracked on GitHub: [gdellis/restic-manager/issues](https://github.com/gdellis/restic-manager/issues)
 - See [AGENTS.md](AGENTS.md) for development commands and CI checks
