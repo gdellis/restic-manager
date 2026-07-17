@@ -46,37 +46,39 @@
 
 ## Current Focus: Open Issues Triage
 
-*Last updated: 2026-07-17*
+*Last updated: 2026-07-17 - TODO: update this date when making changes*
 *Tracking: [GitHub Issues](https://github.com/gdellis/restic-manager/issues)*
+
+For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 
 ### Phase 1: Critical Fixes (High Priority)
 
 | Issue | Title | Status | Effort | PR |
 |-------|-------|--------|--------|-----|
-| #54 | Backup: Path handling could panic on non-UTF8 paths | 🟡 Backlog | 15 min | |
-| #49 | Logging: warn on invalid RUST_LOG instead of silently falling back | 🟡 Backlog | 30 min | |
-| #53 | Notifications: Unicode emoji may cause issues in non-UTF8 terminals | 🟡 Backlog | 30 min | |
+| #54 | Backup: Path handling could panic on non-UTF8 paths | 🟡 Backlog | 15 min | — |
+| #49 | Logging: warn on invalid RUST_LOG instead of silently falling back to info | 🟡 Backlog | 30 min | — |
+| #53 | Notifications: Unicode emoji may cause issues in non-UTF8 terminals | 🟡 Backlog | 30 min | — |
 
 **Goal**: Eliminate potential panics and improve debugging experience.
-**Estimated completion**: 1-2 days
+**Estimated completion**: 1-2 hours
 
 ### Phase 2: Code Quality (Medium Priority)
 
 | Issue | Title | Status | Effort | PR |
 |-------|-------|--------|--------|-----|
-| #55 | Documentation: Add doc comments to public structs and methods | 🟡 Backlog | 1 hour | |
-| #46 | Pin the Rust toolchain so local clippy matches CI | 🟡 Backlog | 20 min | |
-| #56 | Feature: Extend log_cli_output to check, prune, and forget commands | 🟡 Backlog | 1 hour | |
+| #55 | Documentation: Add doc comments to public structs and methods | 🟡 Backlog | 1 hour | — |
+| #46 | Pin the Rust toolchain so local clippy matches CI | 🟡 Backlog | 20 min | — |
+| #56 | Feature: Extend log_cli_output to check, prune, and forget commands | 🟡 Backlog | 1 hour | — |
 
 **Goal**: Improve code maintainability and developer experience.
-**Estimated completion**: 1 day
+**Estimated completion**: ~2 hours
 
 ### Phase 3: Existing Work (Ongoing)
 
 | Issue | Title | Status | Effort | PR |
 |-------|-------|--------|--------|-----|
-| #50 | Shutdown integration tests: contract-shaped assertions and better diagnostics | 🟡 Backlog | 2-3 hours | |
-| #45 | Feature: GUI component for managing backups | 🟢 Icebox | 1-2 weeks | |
+| #50 | Shutdown integration tests: contract-shaped assertions and better diagnostics | 🟡 Backlog | 2-3 hours | — |
+| #45 | Feature: GUI component for managing backups | 🟢 Icebox | 1-2 weeks | — |
 
 **Goal**: Complete deferred polish and plan future features.
 **Estimated completion**: Ongoing
@@ -85,31 +87,20 @@
 
 ### Execution Plan
 
-#### Sprint 1 (Week 1): Stability & Polish
-- Day 1: Fix #54, #49, #53 (critical fixes)
-- Day 2: Complete #55, #46, #56 (code quality)
+#### Hour 1-2: Critical Fixes
+- Fix #54, #49, #53 (total ~1.5 hours)
 
-#### Sprint 2 (Week 2): Testing & Planning
-- Day 3-4: Complete #50 (shutdown test improvements)
-- Day 5: Review #45 (GUI design)
+#### Hour 3-4: Code Quality
+- Complete #55, #46, #56 (total ~2 hours)
 
-### Acceptance Criteria
-
-Each issue must meet the following before closure:
-- [ ] Code changes pass `cargo build`
-- [ ] Code changes pass `cargo test --all-targets`
-- [ ] Code changes pass `cargo clippy --all-targets -- -D warnings`
-- [ ] Code changes pass `cargo fmt --check`
-- [ ] Updated tests (if applicable)
-- [ ] Updated documentation (if applicable)
-- [ ] Commit message follows project conventions
-- [ ] PR description references issue number
+#### Hour 5+: Testing & Planning
+- Complete #50 (2-3 hours)
+- Review #45 (design discussion)
 
 ---
 
 ## Notes
 
-- Start date:
-- Target: Linux only initially
 - Config location: ~/.config/restic-manager/
 - All issues tracked on GitHub: https://github.com/gdellis/restic-manager/issues
+- See [AGENTS.md](AGENTS.md) for development commands and CI checks
