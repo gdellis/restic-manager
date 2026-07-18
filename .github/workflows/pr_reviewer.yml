@@ -1,19 +1,23 @@
 name: OpenCode Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
+  group: opencode-review-${{ github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    uses: ./.github/workflows/opencode.yml
+    if: |
+      github.event.issue.pull_request &&
+      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode')) &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     permissions:
       contents: read
       pull-requests: write
+    uses: ./.github/workflows/opencode.yml
     with:
       include_pr_context: true
       model: 'ollama-cloud/minimax-m3'
