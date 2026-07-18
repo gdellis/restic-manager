@@ -5,6 +5,32 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Build a failure notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_failure_message(job_name: &str, error: &str) -> String {
+    format!("[FAILED] {}\n\nError: {}", job_name, error)
+}
+
+/// Build a partial notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_partial_message(job_name: &str, snapshot_id: Option<&str>, error: &str) -> String {
+    let snap = snapshot_id.unwrap_or("none");
+    format!(
+        "[PARTIAL] {}\n\nSnapshot: {}\nSome files could not be read: {}",
+        job_name, snap, error
+    )
+}
+
+/// Build a success notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_success_message(job_name: &str, snapshot_id: Option<&str>) -> String {
+    if let Some(snap) = snapshot_id {
+        format!("[SUCCESS] {}\n\nSnapshot: {}", job_name, snap)
+    } else {
+        format!("[SUCCESS] {}", job_name)
+    }
+}
+
 pub struct Notifications {
     client: Client,
     bot_token: Option<String>,
@@ -54,7 +80,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let message = format!("❌ Backup Failed: {}\n\nError: {}", job_name, error);
+        let message = build_failure_message(job_name, error);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(true);
@@ -79,11 +105,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let snap = snapshot_id.unwrap_or("none");
-        let message = format!(
-            "⚠️ Backup Partial: {}\n\nSnapshot: {}\nSome files could not be read: {}",
-            job_name, snap, error
-        );
+        let message = build_partial_message(job_name, snapshot_id, error);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(true);
@@ -104,11 +126,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let message = if let Some(snap) = snapshot_id {
-            format!("✅ Backup Success: {}\n\nSnapshot: {}", job_name, snap)
-        } else {
-            format!("✅ Backup Success: {}", job_name)
-        };
+        let message = build_success_message(job_name, snapshot_id);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(false);
@@ -559,5 +577,29 @@ mod tests {
             .notify_partial("test-job", Some("snap123"), "err")
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_notification_messages_use_ascii_tags() {
+        // Regression test for #53: ensure messages use ASCII tags, not emoji
+        // Test the actual message-building functions directly
+        let failure_msg = build_failure_message("test-job", "test error");
+        assert!(failure_msg.contains("[FAILED]"));
+        assert!(!failure_msg.contains("❌"));
+        assert!(!failure_msg.contains("Backup Failed"));
+
+        let partial_msg = build_partial_message("test-job", Some("snap123"), "test error");
+        assert!(partial_msg.contains("[PARTIAL]"));
+        assert!(!partial_msg.contains("⚠️"));
+        assert!(!partial_msg.contains("Backup Partial"));
+
+        let success_msg = build_success_message("test-job", Some("snap123"));
+        assert!(success_msg.contains("[SUCCESS]"));
+        assert!(!success_msg.contains("✅"));
+        assert!(!success_msg.contains("Backup Success"));
+
+        let success_no_snap = build_success_message("test-job", None);
+        assert!(success_no_snap.contains("[SUCCESS]"));
+        assert!(!success_no_snap.contains("✅"));
     }
 }

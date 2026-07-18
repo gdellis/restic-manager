@@ -1,8 +1,16 @@
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
+use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info, warn};
+
+/// Convert a path to a string suitable for use as a command argument.
+/// Uses to_string_lossy() to handle non-UTF8 paths safely.
+/// Regression fix for #54: to_str().unwrap_or(".") would panic or return "." on non-UTF8 paths.
+pub fn path_to_arg(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
 
 fn format_progress(
     files_done: u64,
@@ -168,7 +176,7 @@ impl Backup {
         }
 
         for path in paths {
-            args.push(path.to_str().unwrap_or(".").to_string());
+            args.push(path_to_arg(path));
         }
 
         debug!("Executing: restic {}", args.join(" "));
@@ -864,5 +872,59 @@ mod tests {
 
         let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_path_to_arg_with_utf8_path() {
+        // Test normal UTF-8 path
+        let path = std::path::PathBuf::from("/normal/path");
+        let result = path_to_arg(&path);
+        assert_eq!(result, "/normal/path");
+        assert_ne!(result, ".");
+    }
+
+    #[test]
+    fn test_path_to_arg_with_non_utf8_path() {
+        // Regression test for #54: to_str().unwrap_or() would panic or return "."
+        // on non-UTF8 paths; path_to_arg uses to_string_lossy() which handles them safely.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let non_utf8_path =
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"test/\xFF\xFE/file"));
+            let result = path_to_arg(&non_utf8_path);
+            // Should not be "." and should not be empty
+            assert_ne!(result, ".");
+            assert!(!result.is_empty());
+            // Should contain the valid UTF-8 prefix
+            assert!(result.contains("test/"));
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix systems, we can still test that the function works
+            // with a normal path (the non-UTF8 case is harder to test on Windows)
+            let path = std::path::PathBuf::from("test/path");
+            let result = path_to_arg(&path);
+            assert_ne!(result, ".");
+            assert!(!result.is_empty());
+            assert!(result.contains("test"));
+        }
+    }
+
+    #[test]
+    fn test_path_to_arg_never_returns_dot_for_valid_paths() {
+        // Ensure we never return "." which was the bug in the original code
+        let test_paths = vec![
+            std::path::PathBuf::from("file.txt"),
+            std::path::PathBuf::from("/absolute/path"),
+            std::path::PathBuf::from("./relative"),
+        ];
+
+        for path in test_paths {
+            let result = path_to_arg(&path);
+            // The bug was returning "." for non-UTF8 paths
+            // path_to_arg should never return "." for any valid path
+            assert_ne!(result, ".", "path_to_arg returned '.' for path: {:?}", path);
+        }
     }
 }
