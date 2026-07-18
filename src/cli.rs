@@ -70,14 +70,7 @@ pub fn cli_run() -> Result<(), AppError> {
     // so journal/file output stays free of escape sequences. try_init
     // rather than init so a second call (e.g. from a test harness) is a
     // no-op instead of a panic.
-    let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
-        Ok(filter) => filter,
-        Err(e) if std::env::var_os("RUST_LOG").is_some() => {
-            eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
-            tracing_subscriber::EnvFilter::new("info")
-        }
-        Err(_) => tracing_subscriber::EnvFilter::new("info"),
-    };
+    let env_filter = build_env_filter();
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -179,35 +172,38 @@ pub fn cli_run() -> Result<(), AppError> {
     Ok(())
 }
 
+/// Build an EnvFilter from RUST_LOG, with fallback to default 'info' level.
+/// Emits a warning to stderr if RUST_LOG is set but contains invalid directives.
+fn build_env_filter() -> tracing_subscriber::EnvFilter {
+    match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(e) if std::env::var_os("RUST_LOG").is_some() => {
+            eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
+            tracing_subscriber::EnvFilter::new("info")
+        }
+        Err(_) => tracing_subscriber::EnvFilter::new("info"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// Helper function extracted from cli_run for testability
-    fn build_env_filter_for_test() -> tracing_subscriber::EnvFilter {
-        match tracing_subscriber::EnvFilter::try_from_default_env() {
-            Ok(filter) => filter,
-            Err(e) if std::env::var_os("RUST_LOG").is_some() => {
-                eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
-                tracing_subscriber::EnvFilter::new("info")
-            }
-            Err(_) => tracing_subscriber::EnvFilter::new("info"),
-        }
-    }
+    use super::build_env_filter;
 
     #[test]
     fn test_invalid_rust_log_uses_default_filter() {
         // Regression test for #49: invalid RUST_LOG should fall back to default
         // Use a truly invalid directive that will cause a parse error
         let original = std::env::var_os("RUST_LOG");
-        
+
         std::env::set_var("RUST_LOG", "invalid_level");
-        
-        let filter = build_env_filter_for_test();
-        
+
+        let filter = build_env_filter();
+
         // Should have default info level when invalid
-        assert!(filter.max_level_hint().is_some_and(|l| l >= tracing::Level::INFO));
-        
+        assert!(filter
+            .max_level_hint()
+            .is_some_and(|l| l >= tracing::Level::INFO));
+
         // Restore original
         match original {
             Some(val) => std::env::set_var("RUST_LOG", val),
@@ -218,17 +214,41 @@ mod tests {
     #[test]
     fn test_build_env_filter_with_valid_rust_log() {
         let original = std::env::var_os("RUST_LOG");
-        
+
         std::env::set_var("RUST_LOG", "debug");
-        let filter = build_env_filter_for_test();
-        
+        let filter = build_env_filter();
+
         // Should have debug level
-        assert!(filter.max_level_hint().is_some_and(|l| l >= tracing::Level::DEBUG));
-        
+        assert!(filter
+            .max_level_hint()
+            .is_some_and(|l| l >= tracing::Level::DEBUG));
+
         // Restore original
         match original {
             Some(val) => std::env::set_var("RUST_LOG", val),
             None => std::env::remove_var("RUST_LOG"),
+        }
+    }
+
+    #[test]
+    fn test_build_env_filter_with_no_rust_log() {
+        let original = std::env::var_os("RUST_LOG");
+
+        // Remove RUST_LOG if set
+        if original.is_some() {
+            std::env::remove_var("RUST_LOG");
+        }
+
+        let filter = build_env_filter();
+
+        // Should have default info level when RUST_LOG is not set
+        assert!(filter
+            .max_level_hint()
+            .is_some_and(|l| l >= tracing::Level::INFO));
+
+        // Restore original
+        if let Some(val) = original {
+            std::env::set_var("RUST_LOG", val);
         }
     }
 }

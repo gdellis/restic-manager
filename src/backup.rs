@@ -874,7 +874,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_path_to_arg_with_utf8_path() {
         // Test normal UTF-8 path
@@ -891,7 +890,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            let non_utf8_path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"test/\xFF\xFE/file"));
+            let non_utf8_path =
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"test/\xFF\xFE/file"));
             let result = path_to_arg(&non_utf8_path);
             // Should not be "." and should not be empty
             assert_ne!(result, ".");
@@ -919,7 +919,7 @@ mod tests {
             std::path::PathBuf::from("/absolute/path"),
             std::path::PathBuf::from("./relative"),
         ];
-        
+
         for path in test_paths {
             let result = path_to_arg(&path);
             // The bug was returning "." for non-UTF8 paths

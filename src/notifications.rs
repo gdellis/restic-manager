@@ -582,25 +582,24 @@ mod tests {
     #[tokio::test]
     async fn test_notification_messages_use_ascii_tags() {
         // Regression test for #53: ensure messages use ASCII tags, not emoji
-        let _config = test_config();
-        
-        // These would panic if emoji were present (or if the format changed)
-        // We test the message construction indirectly via the public methods
-        // The actual messages are private, but we can verify the format via
-        // the truncate_for_telegram function which is public
-        let test_messages = vec![
-            "[FAILED] Backup Failed: test",
-            "[PARTIAL] Backup Partial: test",
-            "[SUCCESS] Backup Success: test",
-        ];
-        for msg in test_messages {
-            let truncated = Notifications::truncate_for_telegram(msg);
-            assert!(truncated.contains("[FAILED]") || 
-                    truncated.contains("[PARTIAL]") || 
-                    truncated.contains("[SUCCESS]"));
-            assert!(!truncated.contains("❌"));
-            assert!(!truncated.contains("✅"));
-            assert!(!truncated.contains("⚠️"));
-        }
+        // Test the actual message-building functions directly
+        let failure_msg = build_failure_message("test-job", "test error");
+        assert!(failure_msg.contains("[FAILED]"));
+        assert!(!failure_msg.contains("❌"));
+        assert!(!failure_msg.contains("Backup Failed"));
+
+        let partial_msg = build_partial_message("test-job", Some("snap123"), "test error");
+        assert!(partial_msg.contains("[PARTIAL]"));
+        assert!(!partial_msg.contains("⚠️"));
+        assert!(!partial_msg.contains("Backup Partial"));
+
+        let success_msg = build_success_message("test-job", Some("snap123"));
+        assert!(success_msg.contains("[SUCCESS]"));
+        assert!(!success_msg.contains("✅"));
+        assert!(!success_msg.contains("Backup Success"));
+
+        let success_no_snap = build_success_message("test-job", None);
+        assert!(success_no_snap.contains("[SUCCESS]"));
+        assert!(!success_no_snap.contains("✅"));
     }
 }
