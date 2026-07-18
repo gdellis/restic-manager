@@ -81,3 +81,7 @@ finding a portable equivalent first.
   `~/.config/opencode/`, etc. — those are personal dotfiles and drift independently of
   this repo).
 - Local tool state (`.omo/`, `.opencode/`) is in `.gitignore`; never `git add -f` it.
+- **Requesting an OpenCode review**: comment `/opencode` or `/oc` on a PR. The
+  `OpenCode Review` workflow is triggered only by PR comments from maintainers,
+  collaborators, or organization members; it no longer runs automatically on every
+  push.
