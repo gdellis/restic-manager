@@ -3,6 +3,7 @@ use crate::secrets::Secrets;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +34,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        for (repo_name, repo) in &self.repositories {
+            repo.validate(repo_name)?;
+        }
         for (job_name, job) in &self.jobs {
             if !self.repositories.contains_key(&job.repository) {
                 return Err(ConfigError::Invalid(format!(
@@ -40,6 +44,7 @@ impl Config {
                     job_name, job.repository
                 )));
             }
+            job.validate(job_name)?;
         }
         Ok(())
     }
@@ -68,6 +73,24 @@ pub struct Repository {
     pub password_key: String,
     #[serde(default)]
     pub log_cli_output: Option<PathBuf>,
+}
+
+impl Repository {
+    fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        if self.repo.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "Repository '{}' has an empty repo path",
+                name
+            )));
+        }
+        if self.password_key.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "Repository '{}' has an empty password_key",
+                name
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +189,58 @@ pub struct Job {
     pub post_backup: Vec<Hook>,
 }
 
+impl Job {
+    fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        if self.repository.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "Job '{}' has an empty repository reference",
+                name
+            )));
+        }
+        if self.paths.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "Job '{}' has no backup paths",
+                name
+            )));
+        }
+        for path in &self.paths {
+            if path.to_str().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                return Err(ConfigError::Invalid(format!(
+                    "Job '{}' contains an empty backup path",
+                    name
+                )));
+            }
+        }
+        if let Some(schedule) = &self.schedule {
+            Self::validate_cron(schedule, name)?;
+        }
+        Ok(())
+    }
+
+    fn validate_cron(schedule: &str, job_name: &str) -> Result<(), ConfigError> {
+        let normalized = normalize_cron(schedule);
+        cron::Schedule::from_str(&normalized).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "Job '{}' has an invalid schedule '{}': {}",
+                job_name, schedule, e
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+/// Normalizes a cron expression to the 6-field format expected by the `cron`
+/// crate. Standard 5-field expressions (minute hour dom month dow) are
+/// prefixed with `0` seconds so they work out of the box. Expressions that
+/// already include seconds (6 fields) are left unchanged.
+pub(crate) fn normalize_cron(schedule: &str) -> String {
+    if schedule.split_whitespace().count() == 5 {
+        format!("0 {}", schedule)
+    } else {
+        schedule.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct ResolvedConfig {
     pub config: Config,
@@ -178,7 +253,23 @@ impl ResolvedConfig {
         let secrets = Secrets::load_optional()
             .map_err(crate::errors::AppError::Secrets)?
             .unwrap_or_default();
-        Ok(Self { config, secrets })
+        let resolved = Self { config, secrets };
+        resolved.validate_secrets()?;
+        Ok(resolved)
+    }
+
+    fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {
+        for (repo_name, repo) in &self.config.repositories {
+            if self.secrets.get(&repo.password_key).is_none() {
+                return Err(crate::errors::AppError::Config(ConfigError::Invalid(
+                    format!(
+                        "Repository '{}' references missing secret key '{}'",
+                        repo_name, repo.password_key
+                    ),
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn get_repo_password(&self, repo_name: &str) -> Option<&str> {
@@ -352,5 +443,171 @@ unknown_field: 1
 "#;
         let result: Result<Hook, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_repository_validation_rejects_empty_repo_path() {
+        let yaml = r#"
+repositories:
+  bad:
+    repo: ""
+    password_key: pass
+jobs: {}
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_repository_validation_rejects_empty_password_key() {
+        let yaml = r#"
+repositories:
+  bad:
+    repo: /tmp/repo
+    password_key: ""
+jobs: {}
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_rejects_empty_repository() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: ""
+    paths:
+      - /home
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_rejects_no_paths() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: test
+    paths: []
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_rejects_invalid_cron() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: test
+    paths:
+      - /home
+    schedule: "not a cron"
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_accepts_valid_5_field_cron() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  good:
+    repository: test
+    paths:
+      - /home
+    schedule: "0 2 * * *"
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn test_job_validation_accepts_valid_6_field_cron() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  good:
+    repository: test
+    paths:
+      - /home
+    schedule: "0 0 2 * * *"
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn test_job_validation_rejects_invalid_6_field_cron() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: test
+    paths:
+      - /home
+    schedule: "not a cron"
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn test_resolved_config_validation_rejects_missing_password_secret() {
+        let mut repositories = HashMap::new();
+        repositories.insert(
+            "test-repo".to_string(),
+            Repository {
+                repo: "/tmp/test-repo".to_string(),
+                password_key: "missing-secret".to_string(),
+                log_cli_output: None,
+            },
+        );
+        let mut jobs = HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "test-repo".to_string(),
+                paths: vec!["/tmp".into()],
+                ..Default::default()
+            },
+        );
+        let resolved = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets::default(),
+        };
+        assert!(resolved.validate_secrets().is_err());
     }
 }

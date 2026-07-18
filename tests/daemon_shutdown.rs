@@ -167,6 +167,8 @@ fn scratch_config(test_name: &str, config_yaml: &str, secrets_yaml: Option<&str>
 fn daemon_exits_gracefully_on_sigterm() {
     // One scheduled job is required: with no schedules the daemon exits
     // immediately instead of idling. The 2099 date means it never fires.
+    // secrets.yaml is required because ResolvedConfig::load now validates that
+    // every repository's password_key exists at startup.
     let tmp = scratch_config(
         "sigterm",
         r#"
@@ -181,7 +183,7 @@ jobs:
       - /nonexistent/path
     schedule: "0 0 0 1 1 ? 2099"
 "#,
-        None,
+        Some("test_pass: dummy\n"),
     );
 
     let mut daemon = Daemon::spawn(&tmp, &[]);

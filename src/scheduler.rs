@@ -55,13 +55,8 @@ impl Scheduler {
     }
 
     fn parse_cron(s: &str) -> Result<Schedule, AppError> {
-        let with_seconds = if s.split_whitespace().count() == 5 {
-            format!("0 {}", s)
-        } else {
-            s.to_string()
-        };
-
-        Schedule::from_str(&with_seconds)
+        let normalized = crate::config::normalize_cron(s);
+        Schedule::from_str(&normalized)
             .map_err(|e| AppError::Other(format!("Invalid cron expression: {}", e)))
     }
 
