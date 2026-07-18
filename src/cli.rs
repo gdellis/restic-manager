@@ -201,7 +201,8 @@ mod tests {
         let filter = build_env_filter();
 
         // Should have default info level when invalid
-        assert_eq!(filter.max_level_hint(), Some(tracing::Level::INFO));
+        use tracing_subscriber::filter::LevelFilter;
+        assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
 
         // Restore original
         match original {
