@@ -4,18 +4,32 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::{info, warn};
 
+/// A single restic snapshot, parsed from `restic snapshots --json`.
+///
+/// Field names mirror the JSON keys restic emits so the struct can be
+/// populated by direct indexing into the parsed value (see the snapshot
+/// parser in `SnapshotManager::list`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Full snapshot ID assigned by restic.
     pub id: String,
+    /// Timestamp of the snapshot in restic's RFC3339 string form.
     pub time: String,
+    /// Hostname of the machine that produced the snapshot, if restic captured it.
     pub hostname: Option<String>,
+    /// Tags attached to the snapshot at backup time.
     pub tags: Vec<String>,
+    /// Paths the snapshot covers.
     pub paths: Vec<String>,
+    /// Short form of the snapshot ID, suitable for display and `restore` commands.
     pub short_id: String,
 }
 
+/// The result of listing a job's snapshots, wrapped so callers can extend it
+/// (e.g. with paging metadata) without breaking the public signature.
 #[derive(Debug)]
 pub struct SnapshotList {
+    /// All snapshots returned by restic, in the order restic reported them.
     pub snapshots: Vec<Snapshot>,
 }
 

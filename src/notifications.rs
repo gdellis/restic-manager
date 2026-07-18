@@ -31,6 +31,13 @@ pub fn build_success_message(job_name: &str, snapshot_id: Option<&str>) -> Strin
     }
 }
 
+/// Telegram-backed notification sender.
+///
+/// Wraps a `reqwest::Client`, the bot/chat credentials resolved from
+/// `Secrets`, and a small rate limiter so a flapping job doesn't flood
+/// the channel. All `send_*` methods are no-ops if the bot is not
+/// configured, which keeps callers from having to special-case
+/// "notifications disabled" in their control flow.
 pub struct Notifications {
     client: Client,
     bot_token: Option<String>,
@@ -49,6 +56,9 @@ const MIN_NOTIFICATION_INTERVAL: Duration = Duration::from_secs(300);
 const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 
 impl Notifications {
+    /// Build a `Notifications` from the resolved config, pulling bot
+    /// credentials from `Secrets`. Safe to call when no Telegram section
+    /// is configured - `send_*` will then silently no-op.
     pub fn new(config: &ResolvedConfig) -> Self {
         let telegram = config.secrets.telegram_config();
 
@@ -66,10 +76,16 @@ impl Notifications {
         }
     }
 
+    /// Returns true if both a bot token and chat id were resolved from
+    /// secrets. When false, all `send_*` methods are no-ops.
     pub fn is_configured(&self) -> bool {
         self.bot_token.is_some() && self.chat_id.is_some()
     }
 
+    /// Send a failure notification for `job_name`. No-op if Telegram is
+    /// not configured or if a failure notification was sent within the
+    /// last `MIN_NOTIFICATION_INTERVAL` (5 minutes). The rate-limit slot
+    /// is shared with `send_partial` so the two don't double-alert.
     pub async fn send_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
         if !self.is_configured() {
             return Ok(());
@@ -88,6 +104,11 @@ impl Notifications {
         Ok(())
     }
 
+    /// Send a partial-backup notification (snapshot taken, but some files
+    /// could not be read). No-op if Telegram is not configured or the
+    /// shared failure rate-limit slot is currently active. The toggle
+    /// routing that decides whether to call this in the first place is
+    /// in `NotificationManager::notify_partial`.
     pub async fn send_partial(
         &self,
         job_name: &str,
@@ -113,6 +134,10 @@ impl Notifications {
         Ok(())
     }
 
+    /// Send a success notification for `job_name`, including
+    /// `snapshot_id` if available. No-op if Telegram is not configured
+    /// or a success notification was sent within the last
+    /// `MIN_NOTIFICATION_INTERVAL` (5 minutes).
     pub async fn send_success(
         &self,
         job_name: &str,
@@ -211,12 +236,17 @@ impl Notifications {
     }
 }
 
+/// Per-job notification dispatcher. Wraps `Notifications` together with
+/// the job's `NotificationConfig` so callers can ask "send the right
+/// kind of alert for this job" without checking each toggle themselves.
 pub struct NotificationManager {
     notifications: Notifications,
     job_config: NotificationConfig,
 }
 
 impl NotificationManager {
+    /// Build a manager that uses `job_config`'s on_failure/on_success
+    /// toggles to decide whether each `notify_*` call actually sends.
     pub fn new(config: &ResolvedConfig, job_config: NotificationConfig) -> Self {
         Self {
             notifications: Notifications::new(config),
@@ -224,6 +254,9 @@ impl NotificationManager {
         }
     }
 
+    /// Send a failure notification if the job's `on_failure` toggle is on.
+    /// No-op (and no error) when the toggle is off, so callers don't need
+    /// to branch on the config.
     pub async fn notify_failure(&self, job_name: &str, error: &str) -> Result<(), AppError> {
         if self.job_config.on_failure {
             self.notifications.send_failure(job_name, error).await?;
@@ -231,6 +264,8 @@ impl NotificationManager {
         Ok(())
     }
 
+    /// Send a success notification if the job's `on_success` toggle is on.
+    /// `snapshot_id` is included in the message when `Some`.
     pub async fn notify_success(
         &self,
         job_name: &str,
@@ -244,12 +279,10 @@ impl NotificationManager {
         Ok(())
     }
 
-    /// Partial backups (some files unreadable) are routed through the
-    /// on_failure toggle rather than on_success: on_failure defaults to
-    /// true and on_success defaults to false, so routing through
-    /// on_success would silently produce zero notification for a partial
-    /// backup under the default config - exactly the failure-adjacent case
-    /// where alerting matters most.
+    /// Send a partial-backup notification. Routed through the
+    /// `on_failure` toggle (not `on_success`) so a partial is still
+    /// alerted under the default config: `on_success` defaults to false,
+    /// which would silently swallow a failure-adjacent condition.
     pub async fn notify_partial(
         &self,
         job_name: &str,

@@ -53,19 +53,36 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Summary of a single backup run, parsed from restic's JSON progress stream.
+///
+/// Constructed by `Backup::run` and returned to callers (the CLI, scheduler, and
+/// notification layer) so they can render a result message and decide whether
+/// the run counts as success, partial, or failure.
 #[derive(Debug)]
 pub struct BackupResult {
+    /// Name of the job that produced this backup.
     pub job_name: String,
+    /// Snapshot ID assigned by restic, if the run reached the summary line.
     pub snapshot_id: Option<String>,
+    /// Number of new files added to the repository.
     pub files_new: u32,
+    /// Number of files whose content changed since the last snapshot.
     pub files_changed: u32,
+    /// Number of files identical to the previous snapshot.
     pub files_unmodified: u32,
+    /// Number of new directories indexed.
     pub dirs_new: u32,
+    /// Number of directories whose contents changed.
     pub dirs_changed: u32,
+    /// Number of directories identical to the previous snapshot.
     pub dirs_unmodified: u32,
+    /// Number of data blobs written.
     pub data_blobs: u32,
+    /// Number of tree blobs written.
     pub tree_blobs: u32,
+    /// Bytes added to the repository during this run.
     pub data_added: u64,
+    /// Total wall-clock duration of the restic invocation, in seconds.
     pub duration_secs: f64,
     /// True if restic exited with code 3 (backup completed but some source
     /// files could not be read). A snapshot was still created in this case.
