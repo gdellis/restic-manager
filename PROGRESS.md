@@ -46,7 +46,7 @@
 
 ## Current Focus: Open Issues Triage
 
-*Last updated: 2026-07-17*
+*Last updated: 2026-07-18*
 *Tracking: [GitHub Issues](https://github.com/gdellis/restic-manager/issues)*
 
 For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
@@ -55,9 +55,9 @@ For acceptance criteria, see [AGENTS.md](AGENTS.md#Commands).
 
 | Issue | Title | Status | Effort | PR |
 |-------|-------|--------|--------|-----|
-| #54 | Backup: Path handling could panic on non-UTF8 paths | 🟡 Backlog | 15 min | — |
-| #49 | Logging: warn on invalid RUST_LOG instead of silently falling back to info | 🟡 Backlog | 30 min | — |
-| #53 | Notifications: Unicode emoji may cause issues in non-UTF8 terminals | 🟡 Backlog | 30 min | — |
+| #54 | Backup: Path handling could panic on non-UTF8 paths | ✅ Done | 15 min | #58 |
+| #49 | Logging: warn on invalid RUST_LOG instead of silently falling back to info | ✅ Done | 30 min | #58 |
+| #53 | Notifications: Unicode emoji may cause issues in non-UTF8 terminals | ✅ Done | 30 min | #58 |
 
 **Goal**: Eliminate potential panics and improve debugging experience.
 
