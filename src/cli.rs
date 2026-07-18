@@ -177,11 +177,12 @@ pub fn cli_run() -> Result<(), AppError> {
 fn build_env_filter() -> tracing_subscriber::EnvFilter {
     match tracing_subscriber::EnvFilter::try_from_default_env() {
         Ok(filter) => filter,
-        Err(e) if std::env::var_os("RUST_LOG").is_some() => {
-            eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
+        Err(e) => {
+            if std::env::var_os("RUST_LOG").is_some() {
+                eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
+            }
             tracing_subscriber::EnvFilter::new("info")
         }
-        Err(_) => tracing_subscriber::EnvFilter::new("info"),
     }
 }
 
@@ -192,17 +193,15 @@ mod tests {
     #[test]
     fn test_invalid_rust_log_uses_default_filter() {
         // Regression test for #49: invalid RUST_LOG should fall back to default
-        // Use a truly invalid directive that will cause a parse error
+        // Use a genuinely unparseable directive that causes a parse error
         let original = std::env::var_os("RUST_LOG");
 
-        std::env::set_var("RUST_LOG", "invalid_level");
+        std::env::set_var("RUST_LOG", "foo=bar");
 
         let filter = build_env_filter();
 
         // Should have default info level when invalid
-        assert!(filter
-            .max_level_hint()
-            .is_some_and(|l| l >= tracing::Level::INFO));
+        assert_eq!(filter.max_level_hint(), Some(tracing::Level::INFO));
 
         // Restore original
         match original {

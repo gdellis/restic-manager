@@ -2,6 +2,8 @@ use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
 use std::path::Path;
+use std::process::Command;
+use tracing::{debug, info, warn};
 
 /// Convert a path to a string suitable for use as a command argument.
 /// Uses to_string_lossy() to handle non-UTF8 paths safely.
@@ -9,8 +11,6 @@ use std::path::Path;
 pub fn path_to_arg(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
-use std::process::Command;
-use tracing::{debug, info, warn};
 
 fn format_progress(
     files_done: u64,
