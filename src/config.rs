@@ -14,6 +14,18 @@ pub struct Config {
     pub jobs: HashMap<String, Job>,
 }
 
+fn join_errors(prefix: &str, errors: Vec<String>) -> ConfigError {
+    ConfigError::Invalid(format!(
+        "{} has the following problems:\n{}",
+        prefix,
+        errors
+            .into_iter()
+            .map(|e| format!("- {}", e))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::path()?;
@@ -34,19 +46,32 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        let mut all_errors: Vec<String> = Vec::new();
+
         for (repo_name, repo) in &self.repositories {
-            repo.validate(repo_name)?;
+            if let Err(e) = repo.validate(repo_name) {
+                all_errors.push(e.to_string());
+            }
         }
+
         for (job_name, job) in &self.jobs {
-            if !self.repositories.contains_key(&job.repository) {
-                return Err(ConfigError::Invalid(format!(
+            if !job.repository.trim().is_empty() && !self.repositories.contains_key(&job.repository)
+            {
+                all_errors.push(format!(
                     "Job '{}' references non-existent repository '{}'",
                     job_name, job.repository
-                )));
+                ));
             }
-            job.validate(job_name)?;
+            if let Err(e) = job.validate(job_name) {
+                all_errors.push(e.to_string());
+            }
         }
-        Ok(())
+
+        if all_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(join_errors("Configuration", all_errors))
+        }
     }
 
     pub fn get_repository(&self, name: &str) -> Option<&Repository> {
@@ -77,19 +102,20 @@ pub struct Repository {
 
 impl Repository {
     fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        let mut errors: Vec<String> = Vec::new();
+
         if self.repo.trim().is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "Repository '{}' has an empty repo path",
-                name
-            )));
+            errors.push("empty repo path".to_string());
         }
         if self.password_key.trim().is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "Repository '{}' has an empty password_key",
-                name
-            )));
+            errors.push("empty password_key".to_string());
         }
-        Ok(())
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(join_errors(&format!("Repository '{}'", name), errors))
+        }
     }
 }
 
@@ -191,30 +217,31 @@ pub struct Job {
 
 impl Job {
     fn validate(&self, name: &str) -> Result<(), ConfigError> {
+        let mut errors: Vec<String> = Vec::new();
+
         if self.repository.trim().is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "Job '{}' has an empty repository reference",
-                name
-            )));
+            errors.push("empty repository reference".to_string());
         }
         if self.paths.is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "Job '{}' has no backup paths",
-                name
-            )));
+            errors.push("no backup paths".to_string());
         }
         for path in &self.paths {
             if path.to_str().map(|s| s.trim().is_empty()).unwrap_or(false) {
-                return Err(ConfigError::Invalid(format!(
-                    "Job '{}' contains an empty backup path",
-                    name
-                )));
+                errors.push("contains an empty backup path".to_string());
+                break;
             }
         }
         if let Some(schedule) = &self.schedule {
-            Self::validate_cron(schedule, name)?;
+            if let Err(e) = Self::validate_cron(schedule, name) {
+                errors.push(e.to_string());
+            }
         }
-        Ok(())
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(join_errors(&format!("Job '{}'", name), errors))
+        }
     }
 
     fn validate_cron(schedule: &str, job_name: &str) -> Result<(), ConfigError> {
@@ -259,17 +286,25 @@ impl ResolvedConfig {
     }
 
     fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {
+        let mut missing: Vec<String> = Vec::new();
+
         for (repo_name, repo) in &self.config.repositories {
             if self.secrets.get(&repo.password_key).is_none() {
-                return Err(crate::errors::AppError::Config(ConfigError::Invalid(
-                    format!(
-                        "Repository '{}' references missing secret key '{}'",
-                        repo_name, repo.password_key
-                    ),
-                )));
+                missing.push(format!(
+                    "Repository '{}' references missing secret key '{}'",
+                    repo_name, repo.password_key
+                ));
             }
         }
-        Ok(())
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::errors::AppError::Config(join_errors(
+                "Configuration",
+                missing,
+            )))
+        }
     }
 
     pub fn get_repo_password(&self, repo_name: &str) -> Option<&str> {
@@ -609,5 +644,108 @@ jobs:
             secrets: Secrets::default(),
         };
         assert!(resolved.validate_secrets().is_err());
+    }
+
+    #[test]
+    fn test_repository_reports_multiple_errors() {
+        let yaml = r#"
+repositories:
+  bad:
+    repo: ""
+    password_key: ""
+jobs: {}
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("empty repo path"), "{}", err);
+        assert!(err.contains("empty password_key"), "{}", err);
+    }
+
+    #[test]
+    fn test_job_reports_multiple_errors() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: ""
+    paths: []
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("empty repository reference"), "{}", err);
+        assert!(err.contains("no backup paths"), "{}", err);
+    }
+
+    #[test]
+    fn test_config_reports_multiple_repo_and_job_errors() {
+        let yaml = r#"
+repositories:
+  bad-repo-1:
+    repo: ""
+    password_key: ""
+  bad-repo-2:
+    repo: /tmp/repo
+    password_key: ""
+jobs:
+  bad-job-1:
+    repository: ""
+    paths: []
+  bad-job-2:
+    repository: missing-repo
+    paths:
+      - /home
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("Repository 'bad-repo-1'"), "{}", err);
+        assert!(err.contains("Repository 'bad-repo-2'"), "{}", err);
+        assert!(err.contains("Job 'bad-job-1'"), "{}", err);
+        assert!(err.contains("Job 'bad-job-2'"), "{}", err);
+        assert!(err.contains("missing-repo"), "{}", err);
+    }
+
+    #[test]
+    fn test_resolved_config_reports_all_missing_secrets() {
+        let mut repositories = HashMap::new();
+        repositories.insert(
+            "repo-a".to_string(),
+            Repository {
+                repo: "/tmp/repo-a".to_string(),
+                password_key: "missing-a".to_string(),
+                log_cli_output: None,
+            },
+        );
+        repositories.insert(
+            "repo-b".to_string(),
+            Repository {
+                repo: "/tmp/repo-b".to_string(),
+                password_key: "missing-b".to_string(),
+                log_cli_output: None,
+            },
+        );
+        let mut jobs = HashMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "repo-a".to_string(),
+                paths: vec!["/tmp".into()],
+                ..Default::default()
+            },
+        );
+        let resolved = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets::default(),
+        };
+        let err = resolved.validate_secrets().unwrap_err().to_string();
+        assert!(err.contains("missing-a"), "{}", err);
+        assert!(err.contains("missing-b"), "{}", err);
+        assert!(err.contains("repo-a"), "{}", err);
+        assert!(err.contains("repo-b"), "{}", err);
     }
 }
