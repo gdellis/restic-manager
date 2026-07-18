@@ -16,3 +16,9 @@ secrets.yaml
 Thumbs.db
 
 tarpaulin-report.html
+
+# Local tool state (session JSONs, per-project tool config). Never
+# committed: these are machine-local state for the opencode / omo
+# tooling and have no place in the project history.
+.omo/
+.opencode/

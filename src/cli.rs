@@ -172,83 +172,88 @@ pub fn cli_run() -> Result<(), AppError> {
     Ok(())
 }
 
-/// Build an EnvFilter from RUST_LOG, with fallback to default 'info' level.
-/// Emits a warning to stderr if RUST_LOG is set but contains invalid directives.
-fn build_env_filter() -> tracing_subscriber::EnvFilter {
-    match tracing_subscriber::EnvFilter::try_from_default_env() {
+/// Build a filter from a `RUST_LOG`-style directive string, with
+/// fallback to default `info` level on parse error. Emits a warning
+/// to stderr if the directive is non-empty but invalid.
+///
+/// Pure: no environment access, so callers (and tests) can drive any
+/// directive without touching the process-global `RUST_LOG`.
+fn filter_from_directive(directive: &str) -> tracing_subscriber::EnvFilter {
+    if directive.is_empty() {
+        return tracing_subscriber::EnvFilter::new("info");
+    }
+    match tracing_subscriber::EnvFilter::try_new(directive) {
         Ok(filter) => filter,
         Err(e) => {
-            if std::env::var_os("RUST_LOG").is_some() {
-                eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
-            }
+            eprintln!("Invalid RUST_LOG directive ({}); using default 'info'", e);
             tracing_subscriber::EnvFilter::new("info")
         }
     }
 }
 
+/// Build an EnvFilter from the `RUST_LOG` env var, with fallback to
+/// default 'info' level. Thin wrapper over `filter_from_directive`:
+/// reads the env, then delegates. The split exists so the directive
+/// parser is unit-testable in isolation; the env read is a single
+/// line that only the production caller needs.
+fn build_env_filter() -> tracing_subscriber::EnvFilter {
+    let directive = std::env::var("RUST_LOG").unwrap_or_default();
+    filter_from_directive(&directive)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_env_filter;
+    use super::filter_from_directive;
+    use std::sync::Mutex;
+    use tracing_subscriber::filter::LevelFilter;
+
+    // `filter_from_directive` is pure (no env access), so the tests
+    // for it don't race on RUST_LOG. The env-touching smoke test
+    // for `build_env_filter` is serialized via this mutex because
+    // it does set/unset the process-global `RUST_LOG`. tarpaulin
+    // runs tests in a single process with its own thread
+    // orchestration, where this race was previously visible.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn test_invalid_rust_log_uses_default_filter() {
-        // Regression test for #49: invalid RUST_LOG should fall back to default
-        // Use a genuinely unparseable directive that causes a parse error
-        let original = std::env::var_os("RUST_LOG");
-
-        std::env::set_var("RUST_LOG", "foo=bar");
-
-        let filter = build_env_filter();
-
-        // Should have default info level when invalid
-        use tracing_subscriber::filter::LevelFilter;
+    fn filter_from_empty_directive_uses_default() {
+        let filter = filter_from_directive("");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
-
-        // Restore original
-        match original {
-            Some(val) => std::env::set_var("RUST_LOG", val),
-            None => std::env::remove_var("RUST_LOG"),
-        }
     }
 
     #[test]
-    fn test_build_env_filter_with_valid_rust_log() {
-        let original = std::env::var_os("RUST_LOG");
+    fn filter_from_debug_directive_enables_debug() {
+        let filter = filter_from_directive("debug");
+        assert!(filter
+            .max_level_hint()
+            .is_some_and(|l| l >= tracing::Level::DEBUG));
+    }
+
+    #[test]
+    fn filter_from_invalid_directive_falls_back_to_default() {
+        // Regression test for #49: invalid RUST_LOG should fall back
+        // to default info level, with a warning to stderr.
+        let filter = filter_from_directive("foo=bar");
+        assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
+    }
+
+    #[test]
+    fn build_env_filter_reads_rust_log() {
+        // Serialized because `build_env_filter` reads the process-global
+        // RUST_LOG. The pure-function tests above cover the directive
+        // parsing; this one only verifies the env read + delegation.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var("RUST_LOG").ok();
 
         std::env::set_var("RUST_LOG", "debug");
-        let filter = build_env_filter();
-
-        // Should have debug level
+        let filter = super::build_env_filter();
         assert!(filter
             .max_level_hint()
             .is_some_and(|l| l >= tracing::Level::DEBUG));
 
-        // Restore original
         match original {
             Some(val) => std::env::set_var("RUST_LOG", val),
             None => std::env::remove_var("RUST_LOG"),
-        }
-    }
-
-    #[test]
-    fn test_build_env_filter_with_no_rust_log() {
-        let original = std::env::var_os("RUST_LOG");
-
-        // Remove RUST_LOG if set
-        if original.is_some() {
-            std::env::remove_var("RUST_LOG");
-        }
-
-        let filter = build_env_filter();
-
-        // Should have default info level when RUST_LOG is not set
-        assert!(filter
-            .max_level_hint()
-            .is_some_and(|l| l >= tracing::Level::INFO));
-
-        // Restore original
-        if let Some(val) = original {
-            std::env::set_var("RUST_LOG", val);
         }
     }
 }
