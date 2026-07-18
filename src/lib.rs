@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod cli;
+pub mod cli_log;
 pub mod config;
 pub mod errors;
 pub mod exclude;

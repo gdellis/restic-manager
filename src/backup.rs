@@ -1,3 +1,4 @@
+use crate::cli_log::write_cli_output_log;
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
@@ -305,7 +306,7 @@ impl Backup {
         // most useful for, and it would otherwise be silently skipped by
         // the early return below.
         if let Some(log_path) = log_file {
-            Self::write_cli_output_log(log_path, &lines, stderr_text.as_deref());
+            write_cli_output_log(log_path, &lines, stderr_text.as_deref());
         }
 
         // Exit code 3: backup completed but some source files could not be
@@ -334,56 +335,6 @@ impl Backup {
         );
 
         Ok(result)
-    }
-
-    /// Appends this run's stdout lines and any stderr output to `log_path`,
-    /// so `Repository::log_cli_output` actually captures the CLI output its
-    /// name promises, instead of restic's internal `DEBUG_LOG` tracer.
-    ///
-    /// Each entry is capped at `MAX_CLI_LOG_ENTRY_LEN`, since restic can
-    /// emit one JSON status line per file for a large backup - without a
-    /// cap this file would grow unbounded per run, the same problem #42
-    /// was filed to fix in the first place (just on a different code path).
-    const MAX_CLI_LOG_ENTRY_LEN: usize = 1_048_576;
-
-    fn truncate_cli_log_entry(entry: &str) -> String {
-        if entry.len() <= Self::MAX_CLI_LOG_ENTRY_LEN {
-            return entry.to_string();
-        }
-        let suffix = "\n... (truncated)\n";
-        let mut end = Self::MAX_CLI_LOG_ENTRY_LEN.saturating_sub(suffix.len());
-        while end > 0 && !entry.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}{}", &entry[..end], suffix)
-    }
-
-    fn write_cli_output_log(log_path: &std::path::Path, lines: &[String], stderr: Option<&str>) {
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let mut entry = format!("=== {} ===\n{}\n", chrono::Local::now(), lines.join("\n"));
-        if let Some(stderr) = stderr.filter(|s| !s.is_empty()) {
-            entry.push_str("--- stderr ---\n");
-            entry.push_str(stderr);
-            entry.push('\n');
-        }
-        let entry = Self::truncate_cli_log_entry(&entry);
-
-        use std::io::Write;
-        if let Err(e) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .and_then(|mut f| f.write_all(entry.as_bytes()))
-        {
-            warn!(
-                "Failed to write CLI output log to {}: {}",
-                log_path.display(),
-                e
-            );
-        }
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
@@ -703,54 +654,6 @@ mod tests {
         let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
         let result = Backup::parse_backup_output(json).unwrap();
         assert_eq!(result.errors_count, 0);
-    }
-
-    #[test]
-    fn test_truncate_cli_log_entry_short_text_unchanged() {
-        let entry = "a short log entry";
-        assert_eq!(Backup::truncate_cli_log_entry(entry), entry);
-    }
-
-    #[test]
-    fn test_truncate_cli_log_entry_over_limit_is_truncated() {
-        let entry = "a".repeat(Backup::MAX_CLI_LOG_ENTRY_LEN + 500);
-        let result = Backup::truncate_cli_log_entry(&entry);
-        assert!(result.len() <= Backup::MAX_CLI_LOG_ENTRY_LEN);
-        assert!(result.ends_with("(truncated)\n"));
-    }
-
-    #[test]
-    fn test_truncate_cli_log_entry_respects_char_boundaries() {
-        let entry = "é".repeat(Backup::MAX_CLI_LOG_ENTRY_LEN);
-        let result = Backup::truncate_cli_log_entry(&entry);
-        assert!(result.len() <= Backup::MAX_CLI_LOG_ENTRY_LEN);
-    }
-
-    #[test]
-    fn test_write_cli_output_log_appends_across_calls() {
-        let dir = std::env::temp_dir().join(format!(
-            "restic-manager-test-cli-log-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let log_path = dir.join("nested").join("backup.log");
-
-        Backup::write_cli_output_log(&log_path, &["first run line".to_string()], None);
-        Backup::write_cli_output_log(
-            &log_path,
-            &["second run line".to_string()],
-            Some("a stderr warning"),
-        );
-
-        let contents = std::fs::read_to_string(&log_path).unwrap();
-        assert!(contents.contains("first run line"));
-        assert!(contents.contains("second run line"));
-        assert!(contents.contains("a stderr warning"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
