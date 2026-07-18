@@ -15,6 +15,27 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Duration of the in-flight `Wait` pre-backup hook used by the drain
+/// test. The post-signal "still alive" assertion uses
+/// `HOOK_SECS - 1` so the bound stays in lockstep if the hook
+/// duration ever changes. Must be >= 2: a value of 1 would subtract
+/// to 0 (no margin against the gap between the log line and the hook
+/// actually starting), and a value of 0 would underflow
+/// `Duration::from_secs`.
+const HOOK_SECS: u64 = 5;
+const _: () = assert!(HOOK_SECS >= 2, "HOOK_SECS must be >= 2: see const doc");
+/// How long to keep asserting "the daemon is still alive" after the
+/// drain test sends SIGTERM, before allowing the exit assertion to
+/// run. One second less than the hook gives the test a margin for
+/// the gap between the log line and the hook actually starting.
+const STILL_ALIVE_AFTER_SIGNAL: Duration = Duration::from_secs(HOOK_SECS - 1);
+/// How long the drain test waits for the daemon to exit after
+/// `STILL_ALIVE_AFTER_SIGNAL` elapses. Sized as `HOOK_SECS * 4` so
+/// the deadline tracks the hook: bumping the hook to 60s gives the
+/// daemon 240s to drain, instead of timing out at a fixed 20s that
+/// would silently kill a long-running hook.
+const EXIT_DEADLINE: Duration = Duration::from_secs(HOOK_SECS * 4);
+
 struct Daemon {
     child: Child,
     stderr: Arc<Mutex<String>>,
@@ -88,7 +109,10 @@ impl Daemon {
     }
 
     /// Waits for the daemon to exit, killing it and panicking if it is
-    /// still running when the deadline passes.
+    /// still running when the deadline passes. The panic message
+    /// includes the stderr collected so far so a future contributor
+    /// who lengthens a hook without updating the deadline can see
+    /// which job was in flight and how far shutdown got.
     fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;
         let status = loop {
@@ -96,8 +120,12 @@ impl Daemon {
                 break status;
             }
             if Instant::now() >= deadline {
+                let stderr = self.stderr();
                 self.kill();
-                panic!("daemon did not exit within {:?}", timeout);
+                panic!(
+                    "daemon did not exit within {:?}; stderr:\n{}",
+                    timeout, stderr
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         };
@@ -211,7 +239,7 @@ jobs:
         Some("test_pass: dummy\n"),
     );
 
-    let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TICK_SECS", "1")]);
+    let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TEST_TICK_SECS", "1")]);
 
     daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
 
@@ -271,29 +299,34 @@ jobs:
         Some("test_pass: dummy\n"),
     );
 
-    let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TICK_SECS", "1")]);
+    let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TEST_TICK_SECS", "1")]);
 
     daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
-    let job_started = Instant::now();
 
     daemon.sigterm();
-    let status = daemon.wait_for_exit(Duration::from_secs(20));
-    let waited = job_started.elapsed();
+
+    let alive_check_started = Instant::now();
+    while alive_check_started.elapsed() < STILL_ALIVE_AFTER_SIGNAL {
+        if daemon.child.try_wait().unwrap().is_some() {
+            let stderr = daemon.stderr();
+            panic!(
+                "daemon exited after {:?}, before the in-flight {}s hook \
+                 could have finished - the drain did not wait; stderr:\n{}",
+                alive_check_started.elapsed(),
+                HOOK_SECS,
+                stderr
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let status = daemon.wait_for_exit(EXIT_DEADLINE);
     let stderr = daemon.stderr();
 
     assert!(
         status.success(),
         "daemon exited with {:?}; stderr:\n{}",
         status,
-        stderr
-    );
-    // 4s rather than the hook's full 5s to allow for the delay between
-    // the job actually starting and the test observing its log line.
-    assert!(
-        waited >= Duration::from_secs(4),
-        "daemon exited after {:?}, before the in-flight 5s hook could have \
-         finished - the drain did not wait; stderr:\n{}",
-        waited,
         stderr
     );
     assert!(
