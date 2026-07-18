@@ -55,6 +55,9 @@ impl Config {
         }
 
         for (job_name, job) in &self.jobs {
+            // Skip the missing-repository check when the repository is empty;
+            // Job::validate already reports "empty repository reference" and we
+            // don't want to double-report it as a missing repository.
             if !job.repository.trim().is_empty() && !self.repositories.contains_key(&job.repository)
             {
                 all_errors.push(format!(
@@ -225,10 +228,9 @@ impl Job {
         if self.paths.is_empty() {
             errors.push("no backup paths".to_string());
         }
-        for path in &self.paths {
+        for (i, path) in self.paths.iter().enumerate() {
             if path.to_str().map(|s| s.trim().is_empty()).unwrap_or(false) {
-                errors.push("contains an empty backup path".to_string());
-                break;
+                errors.push(format!("empty backup path at index {}", i + 1));
             }
         }
         if let Some(schedule) = &self.schedule {
@@ -679,6 +681,53 @@ jobs:
         let err = result.unwrap().validate().unwrap_err().to_string();
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
+    }
+
+    #[test]
+    fn test_job_reports_all_empty_backup_paths() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: test
+    paths:
+      - ""
+      - "   "
+      - /home
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("empty backup path at index 1"), "{}", err);
+        assert!(err.contains("empty backup path at index 2"), "{}", err);
+        assert!(!err.contains("empty backup path at index 3"), "{}", err);
+    }
+
+    #[test]
+    fn test_empty_repository_does_not_report_missing_repo() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: ""
+    paths:
+      - /home
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("empty repository reference"), "{}", err);
+        assert!(
+            !err.contains("non-existent repository"),
+            "empty repository should not also be reported as missing: {}",
+            err
+        );
     }
 
     #[test]
