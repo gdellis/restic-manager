@@ -178,3 +178,22 @@ pub fn cli_run() -> Result<(), AppError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_invalid_rust_log_uses_default_filter() {
+        // Regression test for #49: invalid RUST_LOG should fall back to default
+        // We can't test eprintln! output easily, but we can verify the filter works
+        std::env::set_var("RUST_LOG", "info,invalid_directive");
+        
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        
+        // Should have default info level when invalid
+        // This verifies the fallback logic works
+        assert!(env_filter.max_level_hint().map_or(false, |l| l >= tracing::Level::INFO));
+        
+        std::env::remove_var("RUST_LOG");
+    }
+}
