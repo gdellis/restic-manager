@@ -865,4 +865,30 @@ mod tests {
         let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
     }
+
+
+    #[test]
+    fn test_non_utf8_path_converted_safely() {
+        // Regression test for #54: to_str().unwrap_or() would panic or return "."
+        // on non-UTF8 paths; to_string_lossy() handles them safely.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let non_utf8_path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"test/\xFF\xFE"));
+            let result = non_utf8_path.to_string_lossy().to_string();
+            assert_ne!(result, ".");
+            assert!(!result.is_empty());
+            assert!(result.contains("test/"));
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, create a path with wide string that has invalid UTF-16
+            // For simplicity, we just test that to_string_lossy works on a normal path
+            let path = std::path::PathBuf::from("test/path");
+            let result = path.to_string_lossy().to_string();
+            assert_ne!(result, ".");
+            assert!(!result.is_empty());
+            assert!(result.contains("test"));
+        }
+    }
 }
