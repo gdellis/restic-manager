@@ -56,14 +56,10 @@ refactor away the `Mutex` thinking it's dead code.
   unstable — exists only so integration tests don't have to wait for a real minute boundary.
 - **No `cargo new`-style sub-crates.** Single binary, single `Cargo.toml`, all modules live
   under `src/`.
-- **First-party actions in `.github/workflows/` are SHA-pinned** (`actions/checkout`
-  v5.0.0, `actions/cache` v5.0.0, `actions/upload-artifact` v6.0.0). When bumping, verify the
-  new release's `action.yml` actually declares `using: node24` — the v5.0.0 release of
+- **First-party actions in `.github/workflows/` are SHA-pinned.** Verify the new
+  release's `action.yml` actually declares `using: node24` when bumping — the v5.0.0 release of
   `actions/upload-artifact` claimed Node 24 but its `action.yml` was not updated, so it needed
   a bump to v6.0.0 to actually fix the deprecation warning.
-- **`coverage.yml` and `opencode.yml`** still use floating `@v5`/`@v6.0.1` tags on
-  first-party actions. They're v5+ so the deprecation won't fire, but they're an inconsistency
-  with the rest. Issue #68 tracks pinning them to SHAs.
 
 ## Build matrix
 
