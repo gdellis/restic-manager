@@ -162,7 +162,7 @@ impl Scheduler {
         // otherwise would have to wait out a real minute boundary to see a
         // job trigger. It is NOT a stable public interface: don't set it in
         // production, and it may change or disappear without notice.
-        let tick_interval = std::env::var("RESTIC_MANAGER_TICK_SECS")
+        let tick_interval = std::env::var("RESTIC_MANAGER_TEST_TICK_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&s| s > 0)
