@@ -5,6 +5,32 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Build a failure notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_failure_message(job_name: &str, error: &str) -> String {
+    format!("[FAILED] {}\n\nError: {}", job_name, error)
+}
+
+/// Build a partial notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_partial_message(job_name: &str, snapshot_id: Option<&str>, error: &str) -> String {
+    let snap = snapshot_id.unwrap_or("none");
+    format!(
+        "[PARTIAL] {}\n\nSnapshot: {}\nSome files could not be read: {}",
+        job_name, snap, error
+    )
+}
+
+/// Build a success notification message.
+/// Regression fix for #53: replaced emoji with ASCII tags.
+pub fn build_success_message(job_name: &str, snapshot_id: Option<&str>) -> String {
+    if let Some(snap) = snapshot_id {
+        format!("[SUCCESS] {}\n\nSnapshot: {}", job_name, snap)
+    } else {
+        format!("[SUCCESS] {}", job_name)
+    }
+}
+
 pub struct Notifications {
     client: Client,
     bot_token: Option<String>,
@@ -54,7 +80,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let message = format!("[FAILED] Backup Failed: {}\n\nError: {}", job_name, error);
+        let message = build_failure_message(job_name, error);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(true);
@@ -79,11 +105,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let snap = snapshot_id.unwrap_or("none");
-        let message = format!(
-            "[PARTIAL] Backup Partial: {}\n\nSnapshot: {}\nSome files could not be read: {}",
-            job_name, snap, error
-        );
+        let message = build_partial_message(job_name, snapshot_id, error);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(true);
@@ -104,14 +126,7 @@ impl Notifications {
             return Ok(());
         }
 
-        let message = if let Some(snap) = snapshot_id {
-            format!(
-                "[SUCCESS] Backup Success: {}\n\nSnapshot: {}",
-                job_name, snap
-            )
-        } else {
-            format!("[SUCCESS] Backup Success: {}", job_name)
-        };
+        let message = build_success_message(job_name, snapshot_id);
 
         self.send_telegram(&message).await?;
         self.record_notification_sent(false);
