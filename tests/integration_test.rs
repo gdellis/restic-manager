@@ -1,5 +1,10 @@
-use restic_manager::config::{Config, Hook, NotificationConfig, RetentionPolicy};
+use restic_manager::config::{Config, Hook, NotificationConfig, ResolvedConfig, RetentionPolicy};
 use restic_manager::secrets::Secrets;
+use std::io::Write;
+use std::sync::Mutex;
+
+/// Serializes tests that mutate `XDG_CONFIG_HOME` so they don't race.
+static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_config_deserialize() {
@@ -296,4 +301,47 @@ telegram:
     let telegram = secrets.telegram.unwrap();
     assert_eq!(telegram.bot_token.as_deref(), Some("your-bot-token"));
     assert_eq!(telegram.chat_id.as_deref(), Some("your-chat-id"));
+}
+
+#[test]
+fn test_resolved_config_load_fails_when_password_secret_missing() {
+    let _guard = CONFIG_DIR_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!(
+        "restic-manager-test-missing-secret-{}",
+        std::process::id()
+    ));
+    let config_dir = tmp.join("restic-manager");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let config_yaml = r#"
+repositories:
+  local:
+    repo: /backup/repo
+    password_key: missing-secret
+jobs:
+  daily:
+    repository: local
+    paths:
+      - /home
+"#;
+    let mut config_file = std::fs::File::create(config_dir.join("config.yaml")).unwrap();
+    config_file.write_all(config_yaml.as_bytes()).unwrap();
+
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    std::env::set_var("XDG_CONFIG_HOME", &tmp);
+    let result = ResolvedConfig::load();
+    match old_xdg {
+        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("Expected ResolvedConfig::load to fail for missing secret"),
+    };
+    assert!(
+        err.contains("missing-secret"),
+        "error should name the missing secret key, got: {}",
+        err
+    );
 }
