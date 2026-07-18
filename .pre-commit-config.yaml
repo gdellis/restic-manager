@@ -27,6 +27,15 @@ repos:
   hooks:
   - id: markdownlint
     name: markdownlint
-    entry: npx markdownlint-cli
+    entry: npx markdownlint-cli2
     language: node
     types: [markdown]
+
+- repo: https://github.com/dbliss/shellcheck-precommit
+  rev: v0.10.0
+  hooks:
+  - id: shellcheck
+    name: shellcheck
+    entry: shellcheck
+    language: system
+    types: [shell]
