@@ -1,3 +1,4 @@
+use crate::cli_log::write_command_output;
 use crate::config::{ResolvedConfig, RetentionPolicy};
 use crate::errors::{AppError, ResticError};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,8 @@ impl SnapshotManager {
             .output()
             .map_err(ResticError::from_io)?;
 
+        write_command_output(repo.log_cli_output.as_deref(), &output);
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ResticError::CommandFailed(stderr.to_string()).into());
@@ -198,6 +201,8 @@ impl SnapshotManager {
             .env("RESTIC_PASSWORD", password)
             .output()
             .map_err(ResticError::from_io)?;
+
+        write_command_output(repo.log_cli_output.as_deref(), &output);
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
