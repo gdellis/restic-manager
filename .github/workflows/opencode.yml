@@ -51,7 +51,7 @@ jobs:
     # hardcoding the broadest caller's needs for every caller.
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: true
           fetch-depth: ${{ inputs.include_pr_context && 0 || 1 }}
