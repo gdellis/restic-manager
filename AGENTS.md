@@ -46,6 +46,27 @@ process with its own thread orchestration, which races on the process-global `RU
 tests pass in plain `cargo test` and the race is serialized by a `Mutex` in that file. Don't
 refactor away the `Mutex` thinking it's dead code.
 
+## Subagent workflow
+
+Generic workflow and delegation rules live in `.agents/`. Read them before
+starting a non-trivial task:
+
+- `.agents/workflow.md` — the plan → fix → verify → summarize loop.
+- `.agents/calling-conventions.md` — how to delegate work and phrase
+  instructions for subagents.
+
+See [Scratch space](#scratch-space) below for the working directory layout
+agents should use.
+
+When AGENTS.md or `.agents/` grows past a readable size, split additional
+generic guidance into new files under `.agents/` and reference them from
+here.
+
+## Scratch space
+
+Use `./.omo/session-work/` for temporary clones, downloaded references, logs, and agent
+scratch files. Keep durable QA evidence under `./.omo/evidence/` when needed.
+
 ## Repo quirks
 
 - **`Cargo.lock` is gitignored** (line 2 of `.gitignore`). Deps float; CI resolves fresh.
