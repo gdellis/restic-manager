@@ -20,8 +20,8 @@ fn sorted_keys<'a, V>(map: &'a HashMap<String, V>) -> Vec<&'a String> {
     keys
 }
 
-fn join_errors(prefix: &str, errors: Vec<String>) -> ConfigError {
-    ConfigError::Invalid(format!(
+fn join_errors(prefix: &str, errors: Vec<String>) -> String {
+    format!(
         "{} has the following problems:\n{}",
         prefix,
         errors
@@ -29,7 +29,7 @@ fn join_errors(prefix: &str, errors: Vec<String>) -> ConfigError {
             .map(|e| format!("- {}", e))
             .collect::<Vec<_>>()
             .join("\n")
-    ))
+    )
 }
 
 impl Config {
@@ -81,7 +81,10 @@ impl Config {
         if all_errors.is_empty() {
             Ok(())
         } else {
-            Err(join_errors("Configuration", all_errors))
+            Err(ConfigError::Invalid(join_errors(
+                "Configuration",
+                all_errors,
+            )))
         }
     }
 
@@ -125,7 +128,10 @@ impl Repository {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(join_errors(&format!("Repository '{}'", name), errors))
+            Err(ConfigError::Invalid(join_errors(
+                &format!("Repository '{}'", name),
+                errors,
+            )))
         }
     }
 }
@@ -250,7 +256,10 @@ impl Job {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(join_errors(&format!("Job '{}'", name), errors))
+            Err(ConfigError::Invalid(join_errors(
+                &format!("Job '{}'", name),
+                errors,
+            )))
         }
     }
 
@@ -311,9 +320,8 @@ impl ResolvedConfig {
         if missing.is_empty() {
             Ok(())
         } else {
-            Err(crate::errors::AppError::Config(join_errors(
-                "Configuration",
-                missing,
+            Err(crate::errors::AppError::Config(ConfigError::Invalid(
+                join_errors("Missing secrets", missing),
             )))
         }
     }
@@ -693,6 +701,27 @@ jobs:
     }
 
     #[test]
+    fn test_job_reports_cron_and_other_errors() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: ""
+    paths: []
+    schedule: "not a cron"
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("empty repository reference"), "{}", err);
+        assert!(err.contains("no backup paths"), "{}", err);
+        assert!(err.contains("invalid schedule"), "{}", err);
+    }
+
+    #[test]
     fn test_job_reports_all_empty_backup_paths() {
         let yaml = r#"
 repositories:
@@ -832,6 +861,7 @@ jobs:
             secrets: Secrets::default(),
         };
         let err = resolved.validate_secrets().unwrap_err().to_string();
+        assert!(err.contains("Missing secrets"), "{}", err);
         let repo_a = err.find("Repository 'repo-a'").expect("repo-a error");
         let repo_b = err.find("Repository 'repo-b'").expect("repo-b error");
         assert!(
