@@ -14,6 +14,12 @@ pub struct Config {
     pub jobs: HashMap<String, Job>,
 }
 
+fn sorted_keys<'a, V>(map: &'a HashMap<String, V>) -> Vec<&'a String> {
+    let mut keys: Vec<&'a String> = map.keys().collect();
+    keys.sort();
+    keys
+}
+
 fn join_errors(prefix: &str, errors: Vec<String>) -> ConfigError {
     ConfigError::Invalid(format!(
         "{} has the following problems:\n{}",
@@ -48,13 +54,15 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         let mut all_errors: Vec<String> = Vec::new();
 
-        for (repo_name, repo) in &self.repositories {
+        for repo_name in sorted_keys(&self.repositories) {
+            let repo = &self.repositories[repo_name];
             if let Err(e) = repo.validate(repo_name) {
                 all_errors.push(e.to_string());
             }
         }
 
-        for (job_name, job) in &self.jobs {
+        for job_name in sorted_keys(&self.jobs) {
+            let job = &self.jobs[job_name];
             // Skip the missing-repository check when the repository is empty;
             // Job::validate already reports "empty repository reference" and we
             // don't want to double-report it as a missing repository.
@@ -86,11 +94,11 @@ impl Config {
     }
 
     pub fn list_jobs(&self) -> Vec<&String> {
-        self.jobs.keys().collect()
+        sorted_keys(&self.jobs)
     }
 
     pub fn list_repositories(&self) -> Vec<&String> {
-        self.repositories.keys().collect()
+        sorted_keys(&self.repositories)
     }
 }
 
@@ -290,7 +298,8 @@ impl ResolvedConfig {
     fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {
         let mut missing: Vec<String> = Vec::new();
 
-        for (repo_name, repo) in &self.config.repositories {
+        for repo_name in sorted_keys(&self.config.repositories) {
+            let repo = &self.config.repositories[repo_name];
             if self.secrets.get(&repo.password_key).is_none() {
                 missing.push(format!(
                     "Repository '{}' references missing secret key '{}'",
@@ -760,6 +769,37 @@ jobs:
     }
 
     #[test]
+    fn test_config_error_order_is_deterministic() {
+        let yaml = r#"
+repositories:
+  z-repo:
+    repo: ""
+    password_key: ""
+  a-repo:
+    repo: ""
+    password_key: ""
+jobs:
+  z-job:
+    repository: ""
+    paths: []
+  a-job:
+    repository: ""
+    paths: []
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+        let err = result.unwrap().validate().unwrap_err().to_string();
+
+        let repo_a = err.find("Repository 'a-repo'").expect("a-repo error");
+        let repo_z = err.find("Repository 'z-repo'").expect("z-repo error");
+        let job_a = err.find("Job 'a-job'").expect("a-job error");
+        let job_z = err.find("Job 'z-job'").expect("z-job error");
+
+        assert!(repo_a < repo_z, "repo errors should be sorted: {}", err);
+        assert!(job_a < job_z, "job errors should be sorted: {}", err);
+    }
+
+    #[test]
     fn test_resolved_config_reports_all_missing_secrets() {
         let mut repositories = HashMap::new();
         repositories.insert(
@@ -792,9 +832,55 @@ jobs:
             secrets: Secrets::default(),
         };
         let err = resolved.validate_secrets().unwrap_err().to_string();
-        assert!(err.contains("missing-a"), "{}", err);
-        assert!(err.contains("missing-b"), "{}", err);
-        assert!(err.contains("repo-a"), "{}", err);
-        assert!(err.contains("repo-b"), "{}", err);
+        let repo_a = err.find("Repository 'repo-a'").expect("repo-a error");
+        let repo_b = err.find("Repository 'repo-b'").expect("repo-b error");
+        assert!(
+            repo_a < repo_b,
+            "missing secret errors should be sorted: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_list_jobs_returns_sorted_keys() {
+        let yaml = r#"
+repositories:
+  r1:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  z-job:
+    repository: r1
+    paths:
+      - /tmp
+  a-job:
+    repository: r1
+    paths:
+      - /tmp
+  m-job:
+    repository: r1
+    paths:
+      - /tmp
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let jobs: Vec<_> = config.list_jobs().into_iter().cloned().collect();
+        assert_eq!(jobs, vec!["a-job", "m-job", "z-job"]);
+    }
+
+    #[test]
+    fn test_list_repositories_returns_sorted_keys() {
+        let yaml = r#"
+repositories:
+  z-repo:
+    repo: /tmp/z
+    password_key: pass
+  a-repo:
+    repo: /tmp/a
+    password_key: pass
+jobs: {}
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let repos: Vec<_> = config.list_repositories().into_iter().cloned().collect();
+        assert_eq!(repos, vec!["a-repo", "z-repo"]);
     }
 }
