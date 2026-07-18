@@ -85,3 +85,6 @@ finding a portable equivalent first.
   `OpenCode Review` workflow is triggered only by PR comments from maintainers,
   collaborators, or organization members; it no longer runs automatically on every
   push.
+- **Merging pull requests**: an agent may create, push, and update PRs, but must wait
+  for explicit user approval before merging. The user may also merge directly via the
+  GitHub UI. Do not merge automatically, even if CI is green.
