@@ -1,3 +1,4 @@
+use crate::config::{Job, Repository};
 use crate::errors::AppError;
 use crate::snapshot::Snapshot;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -29,6 +30,11 @@ struct App {
     repos: Vec<String>,
     snapshots: Vec<Snapshot>,
     selected_job: Option<String>,
+    selected_repo: Option<String>,
+    job_list_index: usize,
+    repo_list_index: usize,
+    job_details: Option<Job>,
+    repo_details: Option<Repository>,
     logs: VecDeque<String>,
     status_message: Option<(String, Instant)>,
     running_label: Arc<Mutex<Option<String>>>,
@@ -54,6 +60,11 @@ impl App {
             repos: Vec::new(),
             snapshots: Vec::new(),
             selected_job: None,
+            selected_repo: None,
+            job_list_index: 0,
+            repo_list_index: 0,
+            job_details: None,
+            repo_details: None,
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
             status_message: None,
             running_label: Arc::new(Mutex::new(None)),
@@ -254,6 +265,42 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             move_selection(&mut a.sidebar_state, -1);
         }
+        KeyCode::Char('n') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            advance_list_index(&mut a);
+        }
+        KeyCode::Char('p') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            retreat_list_index(&mut a);
+        }
+        KeyCode::Enter => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let selected = a.sidebar_state.selected().unwrap_or(0);
+            let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
+            match view {
+                "Jobs" => {
+                    if !a.jobs.is_empty() && a.job_list_index < a.jobs.len() {
+                        a.selected_job = Some(a.jobs[a.job_list_index].clone());
+                        a.job_details = None;
+                        let name = a.selected_job.clone().unwrap();
+                        let app_arc = Arc::clone(&app);
+                        drop(a);
+                        std::thread::spawn(move || load_job_details_async(app_arc, name));
+                    }
+                }
+                "Repositories" => {
+                    if !a.repos.is_empty() && a.repo_list_index < a.repos.len() {
+                        a.selected_repo = Some(a.repos[a.repo_list_index].clone());
+                        a.repo_details = None;
+                        let name = a.selected_repo.clone().unwrap();
+                        let app_arc = Arc::clone(&app);
+                        drop(a);
+                        std::thread::spawn(move || load_repo_details_async(app_arc, name));
+                    }
+                }
+                _ => {}
+            }
+        }
         KeyCode::Char('r') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(job) = a.selected_job.clone() {
@@ -298,7 +345,7 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
                 a.set_status("Select a job first".to_string());
             }
         }
-        KeyCode::Char('p') => {
+        KeyCode::Char('P') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(job) = a.selected_job.clone() {
                 if command_running(&a) {
@@ -348,6 +395,44 @@ fn move_selection(state: &mut ListState, delta: i32) {
     state.select(Some(next));
 }
 
+fn advance_list_index(app: &mut App) {
+    let selected = app.sidebar_state.selected().unwrap_or(0);
+    let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
+    match view {
+        "Jobs" => {
+            if !app.jobs.is_empty() {
+                app.job_list_index = (app.job_list_index + 1) % app.jobs.len();
+            }
+        }
+        "Repositories" => {
+            if !app.repos.is_empty() {
+                app.repo_list_index = (app.repo_list_index + 1) % app.repos.len();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn retreat_list_index(app: &mut App) {
+    let selected = app.sidebar_state.selected().unwrap_or(0);
+    let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
+    match view {
+        "Jobs" => {
+            if !app.jobs.is_empty() {
+                let len = app.jobs.len();
+                app.job_list_index = (app.job_list_index + len - 1) % len;
+            }
+        }
+        "Repositories" => {
+            if !app.repos.is_empty() {
+                let len = app.repos.len();
+                app.repo_list_index = (app.repo_list_index + len - 1) % len;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn command_running(app: &App) -> bool {
     app.running_label
         .lock()
@@ -373,6 +458,12 @@ fn load_jobs_async(app: Arc<Mutex<App>>) {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             a.jobs = jobs;
                             a.data_loaded.jobs = true;
+                            if !a.jobs.is_empty() && a.job_list_index < a.jobs.len() {
+                                let name = a.jobs[a.job_list_index].clone();
+                                let app_arc = Arc::clone(&app);
+                                drop(a);
+                                std::thread::spawn(move || load_job_details_async(app_arc, name));
+                            }
                         }
                         Err(e) => {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -402,6 +493,50 @@ fn load_jobs_async(app: Arc<Mutex<App>>) {
     }
 }
 
+fn load_job_details_async(app: Arc<Mutex<App>>, job_name: String) {
+    match App::current_exe() {
+        Ok(exe) => {
+            let output = Command::new(&exe)
+                .args(["show", "job", &job_name, "--format", "json"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    match serde_json::from_str::<Job>(stdout.trim()) {
+                        Ok(job) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if a.selected_job.as_deref() == Some(&job_name) {
+                                a.job_details = Some(job);
+                            }
+                        }
+                        Err(e) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.push_log(format!(
+                                "error parsing job details json for {job_name}: {e}"
+                            ));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(format!(
+                        "error loading job details for {job_name}: {stderr}"
+                    ));
+                }
+                Err(e) => {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(format!("error loading job details for {job_name}: {e}"));
+                }
+            }
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.push_log(format!("error loading job details for {job_name}: {e}"));
+        }
+    }
+}
+
 fn load_repos_async(app: Arc<Mutex<App>>) {
     match App::current_exe() {
         Ok(exe) => {
@@ -416,6 +551,12 @@ fn load_repos_async(app: Arc<Mutex<App>>) {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             a.repos = repos;
                             a.data_loaded.repos = true;
+                            if !a.repos.is_empty() && a.repo_list_index < a.repos.len() {
+                                let name = a.repos[a.repo_list_index].clone();
+                                let app_arc = Arc::clone(&app);
+                                drop(a);
+                                std::thread::spawn(move || load_repo_details_async(app_arc, name));
+                            }
                         }
                         Err(e) => {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -441,6 +582,50 @@ fn load_repos_async(app: Arc<Mutex<App>>) {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             a.data_loaded.repos = true;
             a.push_log(format!("error: {e}"));
+        }
+    }
+}
+
+fn load_repo_details_async(app: Arc<Mutex<App>>, repo_name: String) {
+    match App::current_exe() {
+        Ok(exe) => {
+            let output = Command::new(&exe)
+                .args(["show", "repo", &repo_name, "--format", "json"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    match serde_json::from_str::<Repository>(stdout.trim()) {
+                        Ok(repo) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if a.selected_repo.as_deref() == Some(&repo_name) {
+                                a.repo_details = Some(repo);
+                            }
+                        }
+                        Err(e) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.push_log(format!(
+                                "error parsing repo details json for {repo_name}: {e}"
+                            ));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(format!(
+                        "error loading repo details for {repo_name}: {stderr}"
+                    ));
+                }
+                Err(e) => {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(format!("error loading repo details for {repo_name}: {e}"));
+                }
+            }
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.push_log(format!("error loading repo details for {repo_name}: {e}"));
         }
     }
 }
@@ -681,10 +866,12 @@ fn render_help(f: &mut ratatui::Frame) {
 Keybindings:\n\
 \n\
 ↑/↓ or j/k — select sidebar item\n\
+n / p — move selection inside the current list\n\
+Enter — select highlighted job/repository\n\
 r — run selected job\n\
 R — restore (full overlay coming soon)\n\
 l — list snapshots for selected job\n\
-p — prune selected job\n\
+P — prune selected job\n\
 c — check selected job\n\
 L — switch to Logs view\n\
 ? — toggle this help\n\
@@ -733,13 +920,20 @@ fn render_jobs(app: &App) -> Paragraph<'_> {
             lines.push(Line::from("No jobs configured."));
         } else {
             lines.push(Line::from("Jobs:"));
-            for job in &app.jobs {
-                let marker = if app.selected_job.as_deref() == Some(job) {
+            for (idx, job) in app.jobs.iter().enumerate() {
+                let selected_marker = if app.selected_job.as_deref() == Some(job) {
                     "* "
                 } else {
                     "  "
                 };
-                lines.push(Line::from(format!("{marker}{job}")));
+                let highlight_marker = if idx == app.job_list_index {
+                    "> "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(format!(
+                    "{highlight_marker}{selected_marker}{job}"
+                )));
             }
         }
     } else {
@@ -750,6 +944,62 @@ fn render_jobs(app: &App) -> Paragraph<'_> {
 
     if let Some(job) = &app.selected_job {
         lines.push(Line::from(format!("Selected job: {job}")));
+        if let Some(details) = &app.job_details {
+            lines.push(Line::from(format!("  repository: {}", details.repository)));
+            let paths: Vec<String> = details
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            lines.push(Line::from(format!("  paths: {}", paths.join(", "))));
+            if let Some(schedule) = &details.schedule {
+                lines.push(Line::from(format!("  schedule: {}", schedule)));
+                lines.push(Line::from(
+                    "  Next run: (computed from schedule — not yet implemented)".to_string(),
+                ));
+            } else {
+                lines.push(Line::from("  schedule: (none)"));
+                lines.push(Line::from("  Next run: (no schedule)"));
+            }
+            if let Some(retention) = &details.retention {
+                lines.push(Line::from("  retention:"));
+                if let Some(v) = retention.keep_last {
+                    lines.push(Line::from(format!("    keep_last: {}", v)));
+                }
+                if let Some(v) = retention.keep_hourly {
+                    lines.push(Line::from(format!("    keep_hourly: {}", v)));
+                }
+                if let Some(v) = retention.keep_daily {
+                    lines.push(Line::from(format!("    keep_daily: {}", v)));
+                }
+                if let Some(v) = retention.keep_weekly {
+                    lines.push(Line::from(format!("    keep_weekly: {}", v)));
+                }
+                if let Some(v) = retention.keep_monthly {
+                    lines.push(Line::from(format!("    keep_monthly: {}", v)));
+                }
+                if let Some(v) = retention.keep_yearly {
+                    lines.push(Line::from(format!("    keep_yearly: {}", v)));
+                }
+            } else {
+                lines.push(Line::from("  retention: (none)"));
+            }
+            lines.push(Line::from(format!(
+                "  notifications: on_failure={} on_success={}",
+                details.notifications.on_failure, details.notifications.on_success
+            )));
+            lines.push(Line::from(format!(
+                "  hooks: pre_backup={} post_backup={}",
+                details.pre_backup.len(),
+                details.post_backup.len()
+            )));
+            lines.push(Line::from(
+                "  Last run: (not tracked — would require run-history feature)".to_string(),
+            ));
+        } else {
+            lines.push(Line::from("Loading details..."));
+        }
+
         if app.data_loaded.snapshots {
             lines.push(Line::from(""));
             lines.push(Line::from("Snapshots:"));
@@ -764,7 +1014,9 @@ fn render_jobs(app: &App) -> Paragraph<'_> {
             lines.push(Line::from("Loading snapshots..."));
         }
     } else {
-        lines.push(Line::from("Select a job from the list"));
+        lines.push(Line::from(
+            "Select a job from the list (n/p to move, Enter to select)",
+        ));
     }
 
     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
@@ -777,13 +1029,53 @@ fn render_repos(app: &App) -> Paragraph<'_> {
             lines.push(Line::from("No repositories configured."));
         } else {
             lines.push(Line::from("Repositories:"));
-            for repo in &app.repos {
-                lines.push(Line::from(format!("  - {repo}")));
+            for (idx, repo) in app.repos.iter().enumerate() {
+                let selected_marker = if app.selected_repo.as_deref() == Some(repo) {
+                    "* "
+                } else {
+                    "  "
+                };
+                let highlight_marker = if idx == app.repo_list_index {
+                    "> "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(format!(
+                    "{highlight_marker}{selected_marker}{repo}"
+                )));
             }
         }
     } else {
         lines.push(Line::from("Loading..."));
     }
+
+    lines.push(Line::from(""));
+
+    if let Some(repo) = &app.selected_repo {
+        lines.push(Line::from(format!("Selected repository: {repo}")));
+        if let Some(details) = &app.repo_details {
+            lines.push(Line::from(format!("  repo: {}", details.repo)));
+            let masked = if details.password_key.len() > 2 {
+                format!("{}***", &details.password_key[..2])
+            } else {
+                "***".to_string()
+            };
+            lines.push(Line::from(format!("  password_key: {}", masked)));
+            if let Some(log_cli_output) = &details.log_cli_output {
+                lines.push(Line::from(format!(
+                    "  log_cli_output: {}",
+                    log_cli_output.display()
+                )));
+            }
+        } else {
+            lines.push(Line::from("Loading details..."));
+        }
+    } else {
+        lines.push(Line::from(
+            "Select a repository from the list (n/p to move, Enter to select)",
+        ));
+    }
+
     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
 }
 
@@ -815,5 +1107,5 @@ fn build_status_text(app: &App) -> String {
         return format!("running: {label}  ?:help  q:quit");
     }
 
-    "?:help  r:run R:restore l:list p:prune c:check L:logs q:quit".to_string()
+    "?:help n/p list Enter select r:run R:restore l:list P:prune c:check L:logs q:quit".to_string()
 }

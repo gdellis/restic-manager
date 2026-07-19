@@ -5,7 +5,7 @@ use crate::repository::Repository;
 use crate::restore::Restore;
 use crate::scheduler::Scheduler;
 use crate::snapshot::SnapshotManager;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "restic-manager")]
@@ -13,6 +13,12 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowKind {
+    Job,
+    Repo,
 }
 
 #[derive(Subcommand)]
@@ -85,6 +91,17 @@ pub enum Commands {
     InitExclude,
     #[command(about = "Open the interactive terminal dashboard")]
     Tui,
+    #[command(about = "Show full details for a job or repository as JSON")]
+    Show {
+        kind: ShowKind,
+        name: String,
+        #[arg(
+            long,
+            help = "Output format, only 'json' supported. Defaults to plain text.",
+            value_parser = clap::builder::PossibleValuesParser::new(["json"])
+        )]
+        format: Option<String>,
+    },
 }
 
 pub fn cli_run() -> Result<(), AppError> {
@@ -220,6 +237,94 @@ pub fn cli_run() -> Result<(), AppError> {
         Commands::Tui => {
             crate::tui::run()?;
         }
+        Commands::Show { kind, name, format } => match kind {
+            ShowKind::Job => {
+                let job = config
+                    .config
+                    .get_job(&name)
+                    .ok_or_else(|| AppError::Other(format!("Job '{}' not found", name)))?;
+                if format.as_deref() == Some("json") {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(job)
+                            .unwrap_or_else(|e| format!("[json error: {}]", e))
+                    );
+                } else {
+                    println!("Job '{}' details:", name);
+                    println!("  repository: {}", job.repository);
+                    println!(
+                        "  paths: {}",
+                        job.paths
+                            .iter()
+                            .filter_map(|p| p.to_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    if let Some(schedule) = &job.schedule {
+                        println!("  schedule: {}", schedule);
+                    } else {
+                        println!("  schedule: (none)");
+                    }
+                    if let Some(retention) = &job.retention {
+                        println!("  retention:");
+                        if let Some(v) = retention.keep_last {
+                            println!("    keep_last: {}", v);
+                        }
+                        if let Some(v) = retention.keep_hourly {
+                            println!("    keep_hourly: {}", v);
+                        }
+                        if let Some(v) = retention.keep_daily {
+                            println!("    keep_daily: {}", v);
+                        }
+                        if let Some(v) = retention.keep_weekly {
+                            println!("    keep_weekly: {}", v);
+                        }
+                        if let Some(v) = retention.keep_monthly {
+                            println!("    keep_monthly: {}", v);
+                        }
+                        if let Some(v) = retention.keep_yearly {
+                            println!("    keep_yearly: {}", v);
+                        }
+                    } else {
+                        println!("  retention: (none)");
+                    }
+                    println!(
+                        "  notifications: on_failure={} on_success={}",
+                        job.notifications.on_failure, job.notifications.on_success
+                    );
+                    println!(
+                        "  hooks: pre_backup={} post_backup={}",
+                        job.pre_backup.len(),
+                        job.post_backup.len()
+                    );
+                }
+            }
+            ShowKind::Repo => {
+                let repo = config
+                    .config
+                    .get_repository(&name)
+                    .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", name)))?;
+                if format.as_deref() == Some("json") {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(repo)
+                            .unwrap_or_else(|e| format!("[json error: {}]", e))
+                    );
+                } else {
+                    println!("Repository '{}' details:", name);
+                    println!("  repo: {}", repo.repo);
+                    let masked = if repo.password_key.len() > 2 {
+                        format!("{}***", &repo.password_key[..2])
+                    } else {
+                        "***".to_string()
+                    };
+                    println!("  password_key: {}", masked);
+                    if let Some(log_cli_output) = &repo.log_cli_output {
+                        println!("  log_cli_output: {}", log_cli_output.display());
+                    }
+                }
+            }
+        },
     }
 
     Ok(())
@@ -361,5 +466,73 @@ mod tests {
             Cli::try_parse_from(["restic-manager", "list", "documents", "--format", "yaml"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn show_job_json_parses() {
+        let cli = Cli::try_parse_from([
+            "restic-manager",
+            "show",
+            "job",
+            "documents",
+            "--format",
+            "json",
+        ])
+        .expect("parse should succeed");
+        match cli.command {
+            Commands::Show { kind, name, format } => {
+                assert_eq!(kind, super::ShowKind::Job);
+                assert_eq!(name, "documents");
+                assert_eq!(format.as_deref(), Some("json"));
+            }
+            _ => panic!("expected Show variant"),
+        }
+    }
+
+    #[test]
+    fn show_repo_json_parses() {
+        let cli = Cli::try_parse_from([
+            "restic-manager",
+            "show",
+            "repo",
+            "local",
+            "--format",
+            "json",
+        ])
+        .expect("parse should succeed");
+        match cli.command {
+            Commands::Show { kind, name, format } => {
+                assert_eq!(kind, super::ShowKind::Repo);
+                assert_eq!(name, "local");
+                assert_eq!(format.as_deref(), Some("json"));
+            }
+            _ => panic!("expected Show variant"),
+        }
+    }
+
+    #[test]
+    fn show_job_yaml_rejected() {
+        assert!(Cli::try_parse_from([
+            "restic-manager",
+            "show",
+            "job",
+            "documents",
+            "--format",
+            "yaml"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn show_repo_yaml_rejected() {
+        assert!(Cli::try_parse_from([
+            "restic-manager",
+            "show",
+            "repo",
+            "local",
+            "--format",
+            "yaml"
+        ])
+        .is_err());
     }
 }
