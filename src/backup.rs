@@ -457,7 +457,7 @@ mod tests {
     }
 
     fn test_config() -> ResolvedConfig {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -467,7 +467,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_missing_repository() {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -712,7 +712,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -764,8 +764,8 @@ mod tests {
 
     #[test]
     fn test_missing_password() {
-        let repositories = std::collections::HashMap::new();
-        let mut jobs = std::collections::HashMap::new();
+        let repositories = std::collections::BTreeMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
