@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use crate::snapshot::Snapshot;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -6,11 +7,83 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
-use std::io::{self, Stdout};
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader, Stdout};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const SIDEBAR_ITEMS: [&str; 3] = ["Jobs", "Repositories", "Logs"];
 const TICK_MS: u64 = 100;
+const MAX_LOG_LINES: usize = 500;
+const STATUS_MESSAGE_SECONDS: u64 = 5;
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+
+struct App {
+    sidebar_state: ListState,
+    jobs: Vec<String>,
+    repos: Vec<String>,
+    snapshots: Vec<Snapshot>,
+    selected_job: Option<String>,
+    logs: VecDeque<String>,
+    status_message: Option<(String, Instant)>,
+    running_label: Arc<Mutex<Option<String>>>,
+    data_loaded: DataLoaded,
+}
+
+struct DataLoaded {
+    jobs: bool,
+    repos: bool,
+    snapshots: bool,
+}
+
+impl App {
+    fn new() -> Self {
+        let mut sidebar_state = ListState::default();
+        sidebar_state.select(Some(0));
+        Self {
+            sidebar_state,
+            jobs: Vec::new(),
+            repos: Vec::new(),
+            snapshots: Vec::new(),
+            selected_job: None,
+            logs: VecDeque::with_capacity(MAX_LOG_LINES),
+            status_message: None,
+            running_label: Arc::new(Mutex::new(None)),
+            data_loaded: DataLoaded {
+                jobs: false,
+                repos: false,
+                snapshots: false,
+            },
+        }
+    }
+
+    fn push_log(&mut self, line: String) {
+        if self.logs.len() >= MAX_LOG_LINES {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(line);
+    }
+
+    fn set_status(&mut self, msg: String) {
+        self.status_message = Some((msg, Instant::now()));
+    }
+
+    fn current_exe() -> Result<String, AppError> {
+        std::env::current_exe()
+            .map_err(|e| AppError::Other(format!("current_exe: {e}")))?
+            .to_str()
+            .ok_or_else(|| AppError::Other("current_exe is not valid UTF-8".to_string()))
+            .map(String::from)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 pub fn run() -> Result<(), AppError> {
     let mut terminal = setup_terminal()?;
@@ -18,6 +91,10 @@ pub fn run() -> Result<(), AppError> {
     restore_terminal(&mut terminal).ok();
     result
 }
+
+// ---------------------------------------------------------------------------
+// Terminal setup / teardown
+// ---------------------------------------------------------------------------
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, AppError> {
     crossterm::terminal::enable_raw_mode()
@@ -39,13 +116,39 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Main event loop
+// ---------------------------------------------------------------------------
+
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), AppError> {
-    let mut sidebar_state = ListState::default();
-    sidebar_state.select(Some(0));
+    let app = Arc::new(Mutex::new(App::new()));
+
+    // Draw the first frame immediately so the user sees the UI before data loads.
+    terminal
+        .draw(|f| {
+            let app_lock = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            ui(f, &app_lock);
+        })
+        .map_err(|e| AppError::Other(format!("draw: {e}")))?;
+
+    // Kick off initial data loads in the background so the UI stays responsive.
+    // Note: config edits while the TUI is running are not picked up until a
+    // restart. A reload key can be added in a future wave.
+    {
+        let a = Arc::clone(&app);
+        std::thread::spawn(move || load_jobs_async(a));
+    }
+    {
+        let a = Arc::clone(&app);
+        std::thread::spawn(move || load_repos_async(a));
+    }
 
     loop {
         terminal
-            .draw(|f| ui(f, &sidebar_state))
+            .draw(|f| {
+                let app_lock = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                ui(f, &app_lock);
+            })
             .map_err(|e| AppError::Other(format!("draw: {e}")))?;
 
         if event::poll(Duration::from_millis(TICK_MS))
@@ -54,7 +157,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
             if let Event::Key(key) =
                 event::read().map_err(|e| AppError::Other(format!("event::read: {e}")))?
             {
-                if handle_key(key, &mut sidebar_state)? {
+                if handle_key(key, Arc::clone(&app))? {
                     return Ok(());
                 }
             }
@@ -62,13 +165,105 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
     }
 }
 
+// ---------------------------------------------------------------------------
+// Key handling
+// ---------------------------------------------------------------------------
+
 /// Returns `Ok(true)` when the user requested quit.
-fn handle_key(key: KeyEvent, sidebar_state: &mut ListState) -> Result<bool, AppError> {
+fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Down | KeyCode::Char('j') => move_selection(sidebar_state, 1),
-        KeyCode::Up | KeyCode::Char('k') => move_selection(sidebar_state, -1),
+        KeyCode::Down | KeyCode::Char('j') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            move_selection(&mut a.sidebar_state, 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            move_selection(&mut a.sidebar_state, -1);
+        }
+        KeyCode::Char('r') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(job) = a.selected_job.clone() {
+                if command_running(&a) {
+                    a.set_status("A command is already running".to_string());
+                } else {
+                    drop(a);
+                    run_command(
+                        Arc::clone(&app),
+                        format!("run: {job}"),
+                        vec!["run".to_string(), job],
+                    );
+                }
+            } else {
+                a.set_status("Select a job first".to_string());
+            }
+        }
+        KeyCode::Char('R') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.set_status(
+                "Restore: select snapshot and target — full overlay in Wave 4 \
+                 (use CLI: restic-manager restore <job> --target <dir>)"
+                    .to_string(),
+            );
+        }
+        KeyCode::Char('l') => {
+            let job_name = {
+                let a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                a.selected_job.clone()
+            };
+            if let Some(job) = job_name {
+                {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.set_status(format!("Loading snapshots for {job}..."));
+                    a.data_loaded.snapshots = false;
+                    a.snapshots.clear();
+                }
+                let a = Arc::clone(&app);
+                std::thread::spawn(move || load_snapshots_async(a, job));
+            } else {
+                let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                a.set_status("Select a job first".to_string());
+            }
+        }
+        KeyCode::Char('p') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(job) = a.selected_job.clone() {
+                if command_running(&a) {
+                    a.set_status("A command is already running".to_string());
+                } else {
+                    drop(a);
+                    run_command(
+                        Arc::clone(&app),
+                        format!("prune: {job}"),
+                        vec!["prune".to_string(), job],
+                    );
+                }
+            } else {
+                a.set_status("Select a job first".to_string());
+            }
+        }
+        KeyCode::Char('c') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(job) = a.selected_job.clone() {
+                if command_running(&a) {
+                    a.set_status("A command is already running".to_string());
+                } else {
+                    drop(a);
+                    run_command(
+                        Arc::clone(&app),
+                        format!("check: {job}"),
+                        vec!["check".to_string(), job],
+                    );
+                }
+            } else {
+                a.set_status("Select a job first".to_string());
+            }
+        }
+        KeyCode::Char('L') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.sidebar_state.select(Some(2));
+        }
         _ => {}
     }
     Ok(false)
@@ -81,7 +276,251 @@ fn move_selection(state: &mut ListState, delta: i32) {
     state.select(Some(next));
 }
 
-fn ui(f: &mut ratatui::Frame, sidebar_state: &ListState) {
+fn command_running(app: &App) -> bool {
+    app.running_label
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Data loading (background threads)
+// ---------------------------------------------------------------------------
+
+fn load_jobs_async(app: Arc<Mutex<App>>) {
+    match App::current_exe() {
+        Ok(exe) => {
+            let output = Command::new(&exe)
+                .args(["jobs", "--format", "json"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    match serde_json::from_str::<Vec<String>>(stdout.trim()) {
+                        Ok(jobs) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.jobs = jobs;
+                            a.data_loaded.jobs = true;
+                        }
+                        Err(e) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.data_loaded.jobs = true;
+                            a.push_log(format!("error parsing jobs json: {e}"));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.jobs = true;
+                    a.push_log(format!("error loading jobs: {stderr}"));
+                }
+                Err(e) => {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.jobs = true;
+                    a.push_log(format!("error: {e}"));
+                }
+            }
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.data_loaded.jobs = true;
+            a.push_log(format!("error: {e}"));
+        }
+    }
+}
+
+fn load_repos_async(app: Arc<Mutex<App>>) {
+    match App::current_exe() {
+        Ok(exe) => {
+            let output = Command::new(&exe)
+                .args(["repos", "--format", "json"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    match serde_json::from_str::<Vec<String>>(stdout.trim()) {
+                        Ok(repos) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.repos = repos;
+                            a.data_loaded.repos = true;
+                        }
+                        Err(e) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.data_loaded.repos = true;
+                            a.push_log(format!("error parsing repos json: {e}"));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.repos = true;
+                    a.push_log(format!("error loading repos: {stderr}"));
+                }
+                Err(e) => {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.repos = true;
+                    a.push_log(format!("error: {e}"));
+                }
+            }
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.data_loaded.repos = true;
+            a.push_log(format!("error: {e}"));
+        }
+    }
+}
+
+fn load_snapshots_async(app: Arc<Mutex<App>>, job_name: String) {
+    match App::current_exe() {
+        Ok(exe) => {
+            let output = Command::new(&exe)
+                .args(["list", &job_name, "--format", "json"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    match serde_json::from_str::<Vec<Snapshot>>(stdout.trim()) {
+                        Ok(snapshots) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.snapshots = snapshots;
+                            a.data_loaded.snapshots = true;
+                        }
+                        Err(e) => {
+                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            a.data_loaded.snapshots = true;
+                            a.push_log(format!("error parsing snapshots json: {e}"));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.snapshots = true;
+                    a.push_log(format!("error loading snapshots for {job_name}: {stderr}"));
+                }
+                Err(e) => {
+                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.data_loaded.snapshots = true;
+                    a.push_log(format!("error: {e}"));
+                }
+            }
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.data_loaded.snapshots = true;
+            a.push_log(format!("error: {e}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background command execution
+// ---------------------------------------------------------------------------
+
+/// Spawn a long-running `restic-manager <args>` command on a background thread
+/// and stream its stdout/stderr into the shared log buffer. The UI stays
+/// responsive because `child.wait()` happens off the main thread.
+///
+/// Known limitation: if the user quits the TUI while a command is running,
+/// the background command may continue. Wave 4 or later can add explicit child
+/// tracking and SIGTERM on exit.
+fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
+    let label_for_log = label.clone();
+    let logs = {
+        let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *a.running_label
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(label);
+        a.push_log(format!("--- starting: {label_for_log} ---"));
+        // Return an independent clone of the running label so the worker thread
+        // can clear it without holding the main app mutex.
+        Arc::clone(&a.running_label)
+    };
+
+    std::thread::spawn(move || {
+        let exe = match App::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                push_log_and_clear(&app, &logs, format!("error spawning command: {e}"));
+                return;
+            }
+        };
+
+        let mut child = match Command::new(&exe)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                push_log_and_clear(&app, &logs, format!("error spawning command: {e}"));
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let app_stdout = Arc::clone(&app);
+        let app_stderr = Arc::clone(&app);
+
+        if let Some(stdout) = stdout {
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    let mut a = app_stdout
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(line);
+                }
+            });
+        }
+
+        if let Some(stderr) = stderr {
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    let mut a = app_stderr
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    a.push_log(line);
+                }
+            });
+        }
+
+        let exit = child.wait().map(|s| s.code());
+        let finish = match exit {
+            Ok(Some(code)) => format!("--- command finished: exit code {code} ---"),
+            Ok(None) => "--- command finished: no exit code ---".to_string(),
+            Err(e) => format!("--- command finished: wait error {e} ---"),
+        };
+
+        {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.push_log(finish);
+        }
+        *logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    });
+}
+
+fn push_log_and_clear(app: &Arc<Mutex<App>>, label: &Arc<Mutex<Option<String>>>, line: String) {
+    {
+        let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        a.push_log(line);
+    }
+    *label
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+// ---------------------------------------------------------------------------
+// UI rendering
+// ---------------------------------------------------------------------------
+
+fn ui(f: &mut ratatui::Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -92,7 +531,7 @@ fn ui(f: &mut ratatui::Frame, sidebar_state: &ListState) {
         .split(f.area());
 
     // Header
-    let header = Paragraph::new(Line::from("restic-manager — tui (skeleton)"))
+    let header = Paragraph::new(Line::from("restic-manager — tui"))
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -107,7 +546,10 @@ fn ui(f: &mut ratatui::Frame, sidebar_state: &ListState) {
         .constraints([Constraint::Length(20), Constraint::Min(1)])
         .split(chunks[1]);
 
-    let items: Vec<ListItem> = SIDEBAR_ITEMS.iter().map(|s| ListItem::new(*s)).collect();
+    let items: Vec<ListItem> = SIDEBAR_ITEMS
+        .iter()
+        .map(|s| ListItem::new(Line::from(*s)))
+        .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::RIGHT).title("Views"))
         .highlight_style(
@@ -116,20 +558,113 @@ fn ui(f: &mut ratatui::Frame, sidebar_state: &ListState) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    f.render_stateful_widget(list, body[0], &mut sidebar_state.clone());
+    f.render_stateful_widget(list, body[0], &mut app.sidebar_state.clone());
 
-    let selected = sidebar_state.selected().unwrap_or(0);
-    let detail_text = match SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs") {
-        "Jobs" => "Jobs view — Wave 3 will populate job list here.",
-        "Repositories" => "Repositories view — Wave 3 will populate repo list here.",
-        _ => "Logs view — Wave 3 will stream command output here.",
+    let selected = app.sidebar_state.selected().unwrap_or(0);
+    let selected_view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
+    let detail = match selected_view {
+        "Jobs" => render_jobs(app),
+        "Repositories" => render_repos(app),
+        _ => render_logs(app, body[1].height as usize),
     };
-    let detail =
-        Paragraph::new(detail_text).block(Block::default().borders(Borders::ALL).title("Detail"));
     f.render_widget(detail, body[1]);
 
     // Status bar
-    let status = Paragraph::new("?:help  q:quit  ↑/↓:select")
-        .style(Style::default().bg(Color::Reset).fg(Color::Gray));
+    let status_text = build_status_text(app);
+    let status =
+        Paragraph::new(status_text).style(Style::default().bg(Color::Reset).fg(Color::Gray));
     f.render_widget(status, chunks[2]);
+}
+
+fn render_jobs(app: &App) -> Paragraph<'_> {
+    let mut lines = Vec::new();
+
+    if app.data_loaded.jobs {
+        if app.jobs.is_empty() {
+            lines.push(Line::from("No jobs configured."));
+        } else {
+            lines.push(Line::from("Jobs:"));
+            for job in &app.jobs {
+                let marker = if app.selected_job.as_deref() == Some(job) {
+                    "* "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(format!("{marker}{job}")));
+            }
+        }
+    } else {
+        lines.push(Line::from("Loading..."));
+    }
+
+    lines.push(Line::from(""));
+
+    if let Some(job) = &app.selected_job {
+        lines.push(Line::from(format!("Selected job: {job}")));
+        if app.data_loaded.snapshots {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Snapshots:"));
+            if app.snapshots.is_empty() {
+                lines.push(Line::from("  (none)"));
+            } else {
+                for snap in &app.snapshots {
+                    lines.push(Line::from(format!("  {}  {}", snap.short_id, snap.time)));
+                }
+            }
+        } else {
+            lines.push(Line::from("Loading snapshots..."));
+        }
+    } else {
+        lines.push(Line::from("Select a job from the list"));
+    }
+
+    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
+}
+
+fn render_repos(app: &App) -> Paragraph<'_> {
+    let mut lines = Vec::new();
+    if app.data_loaded.repos {
+        if app.repos.is_empty() {
+            lines.push(Line::from("No repositories configured."));
+        } else {
+            lines.push(Line::from("Repositories:"));
+            for repo in &app.repos {
+                lines.push(Line::from(format!("  - {repo}")));
+            }
+        }
+    } else {
+        lines.push(Line::from("Loading..."));
+    }
+    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
+}
+
+fn render_logs(app: &App, height: usize) -> Paragraph<'_> {
+    let n = height.saturating_sub(2).max(1);
+    let start = app.logs.len().saturating_sub(n);
+    let lines: Vec<Line> = app
+        .logs
+        .iter()
+        .skip(start)
+        .map(|s| Line::from(s.as_str()))
+        .collect();
+    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Logs"))
+}
+
+fn build_status_text(app: &App) -> String {
+    if let Some((msg, at)) = &app.status_message {
+        if at.elapsed() < Duration::from_secs(STATUS_MESSAGE_SECONDS) {
+            return msg.clone();
+        }
+    }
+
+    if let Some(label) = app
+        .running_label
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        return format!("running: {label}  ?:help  q:quit");
+    }
+
+    "?:help  r:run R:restore l:list p:prune c:check L:logs q:quit".to_string()
 }
