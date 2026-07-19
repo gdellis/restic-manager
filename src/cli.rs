@@ -83,6 +83,8 @@ pub enum Commands {
     Init { name: String },
     #[command(about = "Initialize or reset the exclude file with defaults")]
     InitExclude,
+    #[command(about = "Open the interactive terminal dashboard")]
+    Tui,
 }
 
 pub fn cli_run() -> Result<(), AppError> {
@@ -214,6 +216,9 @@ pub fn cli_run() -> Result<(), AppError> {
         Commands::InitExclude => {
             let path = crate::exclude::ensure_default_exclude_file()?;
             println!("Created default exclude file at: {}", path.display());
+        }
+        Commands::Tui => {
+            crate::tui::run()?;
         }
     }
 
