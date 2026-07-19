@@ -239,7 +239,7 @@ mod tests {
     use crate::secrets::Secrets;
 
     fn test_config() -> ResolvedConfig {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -249,7 +249,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_forget_no_retention_policy() {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -340,7 +340,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_forget_missing_password() {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -431,7 +431,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {

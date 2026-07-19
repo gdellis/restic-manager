@@ -75,7 +75,7 @@ mod tests {
     use crate::secrets::Secrets;
 
     fn test_config() -> ResolvedConfig {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_missing_password_key() {
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_init_missing_password() {
-        let repositories = std::collections::HashMap::new();
+        let repositories = std::collections::BTreeMap::new();
         let config = Config {
             repositories,
             ..Default::default()

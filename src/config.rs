@@ -1,7 +1,7 @@
 use crate::errors::ConfigError;
 use crate::secrets::Secrets;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -9,15 +9,9 @@ use std::str::FromStr;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
-    pub repositories: HashMap<String, Repository>,
+    pub repositories: BTreeMap<String, Repository>,
     #[serde(default)]
-    pub jobs: HashMap<String, Job>,
-}
-
-fn sorted_keys<'a, V>(map: &'a HashMap<String, V>) -> Vec<&'a String> {
-    let mut keys: Vec<&'a String> = map.keys().collect();
-    keys.sort();
-    keys
+    pub jobs: BTreeMap<String, Job>,
 }
 
 fn join_errors(prefix: &str, errors: Vec<String>) -> String {
@@ -54,15 +48,13 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         let mut all_errors: Vec<String> = Vec::new();
 
-        for repo_name in sorted_keys(&self.repositories) {
-            let repo = &self.repositories[repo_name];
+        for (repo_name, repo) in &self.repositories {
             if let Err(e) = repo.validate(repo_name) {
                 all_errors.push(e.to_string());
             }
         }
 
-        for job_name in sorted_keys(&self.jobs) {
-            let job = &self.jobs[job_name];
+        for (job_name, job) in &self.jobs {
             // Skip the missing-repository check when the repository is empty;
             // Job::validate already reports "empty repository reference" and we
             // don't want to double-report it as a missing repository.
@@ -97,11 +89,11 @@ impl Config {
     }
 
     pub fn list_jobs(&self) -> Vec<&String> {
-        sorted_keys(&self.jobs)
+        self.jobs.keys().collect()
     }
 
     pub fn list_repositories(&self) -> Vec<&String> {
-        sorted_keys(&self.repositories)
+        self.repositories.keys().collect()
     }
 }
 
@@ -307,8 +299,7 @@ impl ResolvedConfig {
     fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {
         let mut missing: Vec<String> = Vec::new();
 
-        for repo_name in sorted_keys(&self.config.repositories) {
-            let repo = &self.config.repositories[repo_name];
+        for (repo_name, repo) in &self.config.repositories {
             if self.secrets.get(&repo.password_key).is_none() {
                 missing.push(format!(
                     "Repository '{}' references missing secret key '{}'",
@@ -371,9 +362,10 @@ impl ResolvedConfig {
 mod tests {
     use super::*;
     use crate::secrets::Secrets;
+    use std::collections::HashMap;
 
     fn test_config() -> ResolvedConfig {
-        let mut repositories = HashMap::new();
+        let mut repositories = BTreeMap::new();
         repositories.insert(
             "test-repo".to_string(),
             Repository {
@@ -383,7 +375,7 @@ mod tests {
             },
         );
 
-        let mut jobs = HashMap::new();
+        let mut jobs = BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -640,7 +632,7 @@ jobs:
 
     #[test]
     fn test_resolved_config_validation_rejects_missing_password_secret() {
-        let mut repositories = HashMap::new();
+        let mut repositories = BTreeMap::new();
         repositories.insert(
             "test-repo".to_string(),
             Repository {
@@ -649,7 +641,7 @@ jobs:
                 log_cli_output: None,
             },
         );
-        let mut jobs = HashMap::new();
+        let mut jobs = BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
@@ -830,7 +822,7 @@ jobs:
 
     #[test]
     fn test_resolved_config_reports_all_missing_secrets() {
-        let mut repositories = HashMap::new();
+        let mut repositories = BTreeMap::new();
         repositories.insert(
             "repo-a".to_string(),
             Repository {
@@ -847,7 +839,7 @@ jobs:
                 log_cli_output: None,
             },
         );
-        let mut jobs = HashMap::new();
+        let mut jobs = BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {

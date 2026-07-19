@@ -335,7 +335,7 @@ mod tests {
         use crate::config::{Config, Job, Repository as RepoConfig};
         use crate::secrets::Secrets;
 
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = std::collections::BTreeMap::new();
         repositories.insert(
             "test".to_string(),
             RepoConfig {
@@ -345,7 +345,7 @@ mod tests {
             },
         );
 
-        let mut jobs = std::collections::HashMap::new();
+        let mut jobs = std::collections::BTreeMap::new();
         jobs.insert(
             "test-job".to_string(),
             Job {
