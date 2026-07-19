@@ -40,7 +40,15 @@ pub enum Commands {
     #[command(about = "Prune old snapshots for a job")]
     Prune { name: String },
     #[command(about = "List snapshots for a job")]
-    List { name: String },
+    List {
+        name: String,
+        #[arg(
+            long,
+            help = "Output format, only 'json' supported. Defaults to plain text.",
+            value_parser = clap::builder::PossibleValuesParser::new(["json"])
+        )]
+        format: Option<String>,
+    },
     #[command(about = "Check repository integrity for a job")]
     Check { name: String },
     #[command(about = "Unlock repository for a job")]
@@ -54,9 +62,23 @@ pub enum Commands {
     )]
     Daemon,
     #[command(about = "List all jobs")]
-    Jobs,
-    #[command(about = "List all repositories")]
-    Repos,
+    Jobs {
+        #[arg(
+            long,
+            help = "Output format, only 'json' supported. Defaults to plain text.",
+            value_parser = clap::builder::PossibleValuesParser::new(["json"])
+        )]
+        format: Option<String>,
+    },
+    Repos {
+        #[arg(
+            long,
+            help = "Output format, only 'json' supported. Defaults to plain text.",
+            value_parser = clap::builder::PossibleValuesParser::new(["json"])
+        )]
+        format: Option<String>,
+    },
+
     #[command(about = "Initialize a repository")]
     Init { name: String },
     #[command(about = "Initialize or reset the exclude file with defaults")]
@@ -129,11 +151,19 @@ pub fn cli_run() -> Result<(), AppError> {
                 removed.len()
             );
         }
-        Commands::List { name } => {
+        Commands::List { name, format } => {
             let snapshots = SnapshotManager::list(&config, &name)?;
-            println!("Snapshots for job '{}':", name);
-            for snap in snapshots.snapshots {
-                println!("  {}  {}  {:?}", snap.short_id, snap.time, snap.paths);
+            if format.as_deref() == Some("json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&snapshots.snapshots)
+                        .unwrap_or_else(|e| format!("[json error: {}]", e))
+                );
+            } else {
+                println!("Snapshots for job '{}':", name);
+                for snap in snapshots.snapshots {
+                    println!("  {}  {}  {:?}", snap.short_id, snap.time, snap.paths);
+                }
             }
         }
         Commands::Check { name } => {
@@ -146,18 +176,36 @@ pub fn cli_run() -> Result<(), AppError> {
             let mut scheduler = Scheduler::new(config)?;
             scheduler.run()?;
         }
-        Commands::Jobs => {
+        Commands::Jobs { format } => {
             let jobs = config.config.list_jobs();
-            println!("Configured jobs:");
-            for job in jobs {
-                println!("  - {}", job);
+            if format.as_deref() == Some("json") {
+                let names: Vec<String> = jobs.into_iter().map(String::from).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&names)
+                        .unwrap_or_else(|e| format!("[json error: {}]", e))
+                );
+            } else {
+                println!("Configured jobs:");
+                for job in jobs {
+                    println!("  - {}", job);
+                }
             }
         }
-        Commands::Repos => {
+        Commands::Repos { format } => {
             let repos = config.config.list_repositories();
-            println!("Configured repositories:");
-            for repo in repos {
-                println!("  - {}", repo);
+            if format.as_deref() == Some("json") {
+                let names: Vec<String> = repos.into_iter().map(String::from).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&names)
+                        .unwrap_or_else(|e| format!("[json error: {}]", e))
+                );
+            } else {
+                println!("Configured repositories:");
+                for repo in repos {
+                    println!("  - {}", repo);
+                }
             }
         }
         Commands::Init { name } => {
@@ -204,6 +252,8 @@ fn build_env_filter() -> tracing_subscriber::EnvFilter {
 #[cfg(test)]
 mod tests {
     use super::filter_from_directive;
+    use super::{Cli, Commands};
+    use clap::Parser;
     use std::sync::Mutex;
     use tracing_subscriber::filter::LevelFilter;
 
@@ -255,5 +305,56 @@ mod tests {
             Some(val) => std::env::set_var("RUST_LOG", val),
             None => std::env::remove_var("RUST_LOG"),
         }
+    }
+
+    #[test]
+    fn jobs_format_json_parses() {
+        let cli = Cli::try_parse_from(["restic-manager", "jobs", "--format", "json"])
+            .expect("parse should succeed");
+        match cli.command {
+            Commands::Jobs { format } => assert_eq!(format.as_deref(), Some("json")),
+            _ => panic!("expected Jobs variant"),
+        }
+    }
+
+    #[test]
+    fn repos_format_json_parses() {
+        let cli = Cli::try_parse_from(["restic-manager", "repos", "--format", "json"])
+            .expect("parse should succeed");
+        match cli.command {
+            Commands::Repos { format } => assert_eq!(format.as_deref(), Some("json")),
+            _ => panic!("expected Repos variant"),
+        }
+    }
+
+    #[test]
+    fn list_format_json_parses() {
+        let cli = Cli::try_parse_from(["restic-manager", "list", "documents", "--format", "json"])
+            .expect("parse should succeed");
+        match cli.command {
+            Commands::List { name, format } => {
+                assert_eq!(name, "documents");
+                assert_eq!(format.as_deref(), Some("json"));
+            }
+            _ => panic!("expected List variant"),
+        }
+    }
+
+    #[test]
+    fn jobs_format_yaml_rejected() {
+        assert!(Cli::try_parse_from(["restic-manager", "jobs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn repos_format_yaml_rejected() {
+        assert!(Cli::try_parse_from(["restic-manager", "repos", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn list_format_yaml_rejected() {
+        assert!(
+            Cli::try_parse_from(["restic-manager", "list", "documents", "--format", "yaml"])
+                .is_err()
+        );
     }
 }
