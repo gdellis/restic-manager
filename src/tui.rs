@@ -38,6 +38,7 @@ struct App {
     logs: VecDeque<String>,
     status_message: Option<(String, Instant)>,
     running_label: Arc<Mutex<Option<String>>>,
+    child_pids: Arc<Mutex<Vec<u32>>>,
     data_loaded: DataLoaded,
     daemon_running: bool,
     last_daemon_check: Instant,
@@ -68,6 +69,7 @@ impl App {
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
             status_message: None,
             running_label: Arc::new(Mutex::new(None)),
+            child_pids: Arc::new(Mutex::new(Vec::new())),
             data_loaded: DataLoaded {
                 jobs: false,
                 repos: false,
@@ -152,6 +154,22 @@ pub fn run() -> Result<(), AppError> {
     result
 }
 
+fn kill_remaining_children(child_pids: &Arc<Mutex<Vec<u32>>>) {
+    let pids: Vec<u32> = child_pids
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .drain(..)
+        .collect();
+    for pid in pids {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Terminal setup / teardown
 // ---------------------------------------------------------------------------
@@ -226,6 +244,11 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
                 event::read().map_err(|e| AppError::Other(format!("event::read: {e}")))?
             {
                 if handle_key(key, Arc::clone(&app))? {
+                    let child_pids = {
+                        let a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        Arc::clone(&a.child_pids)
+                    };
+                    kill_remaining_children(&child_pids);
                     return Ok(());
                 }
             }
@@ -257,19 +280,19 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             a.show_help = true;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             move_selection(&mut a.sidebar_state, 1);
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             move_selection(&mut a.sidebar_state, -1);
         }
-        KeyCode::Char('n') => {
+        KeyCode::Char('n') | KeyCode::Char('j') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             advance_list_index(&mut a);
         }
-        KeyCode::Char('p') => {
+        KeyCode::Char('k') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             retreat_list_index(&mut a);
         }
@@ -278,25 +301,21 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
             let selected = a.sidebar_state.selected().unwrap_or(0);
             let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
             match view {
-                "Jobs" => {
-                    if !a.jobs.is_empty() && a.job_list_index < a.jobs.len() {
-                        a.selected_job = Some(a.jobs[a.job_list_index].clone());
-                        a.job_details = None;
-                        let name = a.selected_job.clone().unwrap();
-                        let app_arc = Arc::clone(&app);
-                        drop(a);
-                        std::thread::spawn(move || load_job_details_async(app_arc, name));
-                    }
+                "Jobs" if !a.jobs.is_empty() && a.job_list_index < a.jobs.len() => {
+                    a.selected_job = Some(a.jobs[a.job_list_index].clone());
+                    a.job_details = None;
+                    let name = a.selected_job.clone().unwrap();
+                    let app_arc = Arc::clone(&app);
+                    drop(a);
+                    std::thread::spawn(move || load_job_details_async(app_arc, name));
                 }
-                "Repositories" => {
-                    if !a.repos.is_empty() && a.repo_list_index < a.repos.len() {
-                        a.selected_repo = Some(a.repos[a.repo_list_index].clone());
-                        a.repo_details = None;
-                        let name = a.selected_repo.clone().unwrap();
-                        let app_arc = Arc::clone(&app);
-                        drop(a);
-                        std::thread::spawn(move || load_repo_details_async(app_arc, name));
-                    }
+                "Repositories" if !a.repos.is_empty() && a.repo_list_index < a.repos.len() => {
+                    a.selected_repo = Some(a.repos[a.repo_list_index].clone());
+                    a.repo_details = None;
+                    let name = a.selected_repo.clone().unwrap();
+                    let app_arc = Arc::clone(&app);
+                    drop(a);
+                    std::thread::spawn(move || load_repo_details_async(app_arc, name));
                 }
                 _ => {}
             }
@@ -345,7 +364,7 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
                 a.set_status("Select a job first".to_string());
             }
         }
-        KeyCode::Char('P') => {
+        KeyCode::Char('p') | KeyCode::Char('P') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(job) = a.selected_job.clone() {
                 if command_running(&a) {
@@ -399,15 +418,11 @@ fn advance_list_index(app: &mut App) {
     let selected = app.sidebar_state.selected().unwrap_or(0);
     let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
     match view {
-        "Jobs" => {
-            if !app.jobs.is_empty() {
-                app.job_list_index = (app.job_list_index + 1) % app.jobs.len();
-            }
+        "Jobs" if !app.jobs.is_empty() => {
+            app.job_list_index = (app.job_list_index + 1) % app.jobs.len();
         }
-        "Repositories" => {
-            if !app.repos.is_empty() {
-                app.repo_list_index = (app.repo_list_index + 1) % app.repos.len();
-            }
+        "Repositories" if !app.repos.is_empty() => {
+            app.repo_list_index = (app.repo_list_index + 1) % app.repos.len();
         }
         _ => {}
     }
@@ -417,17 +432,13 @@ fn retreat_list_index(app: &mut App) {
     let selected = app.sidebar_state.selected().unwrap_or(0);
     let view = SIDEBAR_ITEMS.get(selected).copied().unwrap_or("Jobs");
     match view {
-        "Jobs" => {
-            if !app.jobs.is_empty() {
-                let len = app.jobs.len();
-                app.job_list_index = (app.job_list_index + len - 1) % len;
-            }
+        "Jobs" if !app.jobs.is_empty() => {
+            let len = app.jobs.len();
+            app.job_list_index = (app.job_list_index + len - 1) % len;
         }
-        "Repositories" => {
-            if !app.repos.is_empty() {
-                let len = app.repos.len();
-                app.repo_list_index = (app.repo_list_index + len - 1) % len;
-            }
+        "Repositories" if !app.repos.is_empty() => {
+            let len = app.repos.len();
+            app.repo_list_index = (app.repo_list_index + len - 1) % len;
         }
         _ => {}
     }
@@ -458,12 +469,6 @@ fn load_jobs_async(app: Arc<Mutex<App>>) {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             a.jobs = jobs;
                             a.data_loaded.jobs = true;
-                            if !a.jobs.is_empty() && a.job_list_index < a.jobs.len() {
-                                let name = a.jobs[a.job_list_index].clone();
-                                let app_arc = Arc::clone(&app);
-                                drop(a);
-                                std::thread::spawn(move || load_job_details_async(app_arc, name));
-                            }
                         }
                         Err(e) => {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -551,12 +556,6 @@ fn load_repos_async(app: Arc<Mutex<App>>) {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             a.repos = repos;
                             a.data_loaded.repos = true;
-                            if !a.repos.is_empty() && a.repo_list_index < a.repos.len() {
-                                let name = a.repos[a.repo_list_index].clone();
-                                let app_arc = Arc::clone(&app);
-                                drop(a);
-                                std::thread::spawn(move || load_repo_details_async(app_arc, name));
-                            }
                         }
                         Err(e) => {
                             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -681,19 +680,18 @@ fn load_snapshots_async(app: Arc<Mutex<App>>, job_name: String) {
 /// and stream its stdout/stderr into the shared log buffer. The UI stays
 /// responsive because `child.wait()` happens off the main thread.
 ///
-/// Known limitation: if the user quits the TUI while a command is running,
-/// the background command may continue. Wave 4 or later can add explicit child
-/// tracking and SIGTERM on exit.
+/// The child's PID is recorded in `app.child_pids` so the TUI can send SIGTERM
+/// to any remaining children on exit.
 fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
-    let logs = {
+    let (logs, child_pids) = {
         let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *a.running_label
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(label.clone());
         a.push_log(format!("--- starting: {label} ---"));
-        // Return an independent clone of the running label so the worker thread
-        // can clear it without holding the main app mutex.
-        Arc::clone(&a.running_label)
+        // Return independent clones so the worker thread can clear state without
+        // holding the main app mutex.
+        (Arc::clone(&a.running_label), Arc::clone(&a.child_pids))
     };
 
     std::thread::spawn(move || {
@@ -717,6 +715,12 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
                 return;
             }
         };
+
+        let pid = child.id();
+        child_pids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(pid);
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -748,6 +752,11 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
         }
 
         let exit = child.wait().map(|s| s.code());
+        child_pids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|p| *p != pid);
+
         let (finish, status) = match exit {
             Ok(Some(code)) => {
                 let status = if code == 0 {
@@ -866,12 +875,12 @@ fn render_help(f: &mut ratatui::Frame) {
 Keybindings:\n\
 \n\
 ↑/↓ or j/k — select sidebar item\n\
-n / p — move selection inside the current list\n\
+n / k — move selection inside the current list (j also down)\n\
 Enter — select highlighted job/repository\n\
 r — run selected job\n\
 R — restore (full overlay coming soon)\n\
 l — list snapshots for selected job\n\
-P — prune selected job\n\
+p — prune selected job\n\
 c — check selected job\n\
 L — switch to Logs view\n\
 ? — toggle this help\n\
@@ -1015,7 +1024,7 @@ fn render_jobs(app: &App) -> Paragraph<'_> {
         }
     } else {
         lines.push(Line::from(
-            "Select a job from the list (n/p to move, Enter to select)",
+            "Select a job from the list (n/k to move, Enter to select)",
         ));
     }
 
@@ -1055,12 +1064,7 @@ fn render_repos(app: &App) -> Paragraph<'_> {
         lines.push(Line::from(format!("Selected repository: {repo}")));
         if let Some(details) = &app.repo_details {
             lines.push(Line::from(format!("  repo: {}", details.repo)));
-            let masked = if details.password_key.len() > 2 {
-                format!("{}***", &details.password_key[..2])
-            } else {
-                "***".to_string()
-            };
-            lines.push(Line::from(format!("  password_key: {}", masked)));
+            lines.push(Line::from("  password_key: (configured)"));
             if let Some(log_cli_output) = &details.log_cli_output {
                 lines.push(Line::from(format!(
                     "  log_cli_output: {}",
@@ -1072,7 +1076,7 @@ fn render_repos(app: &App) -> Paragraph<'_> {
         }
     } else {
         lines.push(Line::from(
-            "Select a repository from the list (n/p to move, Enter to select)",
+            "Select a repository from the list (n/k to move, Enter to select)",
         ));
     }
 
@@ -1107,5 +1111,5 @@ fn build_status_text(app: &App) -> String {
         return format!("running: {label}  ?:help  q:quit");
     }
 
-    "?:help n/p list Enter select r:run R:restore l:list P:prune c:check L:logs q:quit".to_string()
+    "?:help n/k list Enter select r:run R:restore l:list p:prune c:check L:logs q:quit".to_string()
 }
