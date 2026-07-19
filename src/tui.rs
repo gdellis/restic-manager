@@ -2,10 +2,10 @@ use crate::errors::AppError;
 use crate::snapshot::Snapshot;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Stdout};
@@ -17,6 +17,7 @@ const SIDEBAR_ITEMS: [&str; 3] = ["Jobs", "Repositories", "Logs"];
 const TICK_MS: u64 = 100;
 const MAX_LOG_LINES: usize = 500;
 const STATUS_MESSAGE_SECONDS: u64 = 5;
+const DAEMON_CHECK_SECONDS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // App state
@@ -32,6 +33,9 @@ struct App {
     status_message: Option<(String, Instant)>,
     running_label: Arc<Mutex<Option<String>>>,
     data_loaded: DataLoaded,
+    daemon_running: bool,
+    last_daemon_check: Instant,
+    show_help: bool,
 }
 
 struct DataLoaded {
@@ -58,6 +62,9 @@ impl App {
                 repos: false,
                 snapshots: false,
             },
+            daemon_running: daemon_running(),
+            last_daemon_check: Instant::now(),
+            show_help: false,
         }
     }
 
@@ -78,6 +85,48 @@ impl App {
             .to_str()
             .ok_or_else(|| AppError::Other("current_exe is not valid UTF-8".to_string()))
             .map(String::from)
+    }
+}
+
+fn daemon_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        let entries = match fs::read_dir("/proc") {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            // Read /proc/<pid>/comm to get the process name.
+            let comm = match fs::read_to_string(path.join("comm")) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+            if comm != "restic-manager" {
+                continue;
+            }
+            // Check cmdline for "daemon".
+            let cmdline = match fs::read_to_string(path.join("cmdline")) {
+                Ok(s) => s.replace('\0', " "),
+                Err(_) => continue,
+            };
+            if cmdline.contains("daemon") {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Daemon detection not implemented for this platform.
+        false
     }
 }
 
@@ -151,6 +200,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
             })
             .map_err(|e| AppError::Other(format!("draw: {e}")))?;
 
+        {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if a.last_daemon_check.elapsed() >= Duration::from_secs(DAEMON_CHECK_SECONDS) {
+                a.daemon_running = daemon_running();
+                a.last_daemon_check = Instant::now();
+            }
+        }
+
         if event::poll(Duration::from_millis(TICK_MS))
             .map_err(|e| AppError::Other(format!("event::poll: {e}")))?
         {
@@ -171,9 +228,24 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
 
 /// Returns `Ok(true)` when the user requested quit.
 fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
+    {
+        let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if a.show_help {
+            if key.code == KeyCode::Char('?') || key.code == KeyCode::Esc {
+                a.show_help = false;
+            }
+            // Any other key also dismisses the help overlay.
+            return Ok(false);
+        }
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Char('?') => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.show_help = true;
+        }
         KeyCode::Down | KeyCode::Char('j') => {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             move_selection(&mut a.sidebar_state, 1);
@@ -428,13 +500,12 @@ fn load_snapshots_async(app: Arc<Mutex<App>>, job_name: String) {
 /// the background command may continue. Wave 4 or later can add explicit child
 /// tracking and SIGTERM on exit.
 fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
-    let label_for_log = label.clone();
     let logs = {
         let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *a.running_label
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(label);
-        a.push_log(format!("--- starting: {label_for_log} ---"));
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(label.clone());
+        a.push_log(format!("--- starting: {label} ---"));
         // Return an independent clone of the running label so the worker thread
         // can clear it without holding the main app mutex.
         Arc::clone(&a.running_label)
@@ -492,14 +563,30 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
         }
 
         let exit = child.wait().map(|s| s.code());
-        let finish = match exit {
-            Ok(Some(code)) => format!("--- command finished: exit code {code} ---"),
-            Ok(None) => "--- command finished: no exit code ---".to_string(),
-            Err(e) => format!("--- command finished: wait error {e} ---"),
+        let (finish, status) = match exit {
+            Ok(Some(code)) => {
+                let status = if code == 0 {
+                    None
+                } else {
+                    Some(format!("error: {label} failed (exit {code})"))
+                };
+                (
+                    format!("--- command finished: exit code {code} ---"),
+                    status,
+                )
+            }
+            Ok(None) => ("--- command finished: no exit code ---".to_string(), None),
+            Err(ref e) => (
+                format!("--- command finished: wait error {e} ---"),
+                Some(format!("error: {label} failed (wait error)")),
+            ),
         };
 
         {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(msg) = status {
+                a.set_status(msg);
+            }
             a.push_log(finish);
         }
         *logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -531,7 +618,16 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .split(f.area());
 
     // Header
-    let header = Paragraph::new(Line::from("restic-manager — tui"))
+    let daemon_dot = if app.daemon_running {
+        Span::styled("●", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("○", Style::default().fg(Color::Red))
+    };
+    let header_text = Text::from(Line::from(vec![
+        Span::raw("restic-manager — tui  daemon: "),
+        daemon_dot,
+    ]));
+    let header = Paragraph::new(header_text)
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -574,6 +670,59 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     let status =
         Paragraph::new(status_text).style(Style::default().bg(Color::Reset).fg(Color::Gray));
     f.render_widget(status, chunks[2]);
+
+    if app.show_help {
+        render_help(f);
+    }
+}
+
+fn render_help(f: &mut ratatui::Frame) {
+    let help_text = "\
+Keybindings:\n\
+\n\
+↑/↓ or j/k — select sidebar item\n\
+r — run selected job\n\
+R — restore (full overlay coming soon)\n\
+l — list snapshots for selected job\n\
+p — prune selected job\n\
+c — check selected job\n\
+L — switch to Logs view\n\
+? — toggle this help\n\
+q / Esc / Ctrl-C — quit";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Help")
+        .title_alignment(Alignment::Center)
+        .border_style(Style::default().fg(Color::Cyan));
+    let paragraph = Paragraph::new(help_text)
+        .block(block)
+        .alignment(Alignment::Center)
+        .wrap(ratatui::widgets::Wrap { trim: true });
+
+    let area = centered_rect(60, 60, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn render_jobs(app: &App) -> Paragraph<'_> {
