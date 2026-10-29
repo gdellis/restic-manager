@@ -216,17 +216,46 @@ last would conflict with every other TUI PR.*
 - Verify: `cargo clippy --all-targets --all-features -- -D warnings` clean; TUI still renders
   (pty capture).
 
-## Open questions — need a decision before implementation
+## Decisions (made 2026-10-28)
 
-1. **Retention: opt-in or automatic?** The README says "automatic snapshot pruning," but wiring
-   retention into every backup changes behaviour for existing users whose repos currently grow
-   unbounded. Recommended: **opt-in per job** (only prune when a job has a `retention:` block),
-   which matches how the config already reads.
-2. **TUI keybindings: fix the code or the docs?** The README says `j`/`k` select the sidebar; the
-   code uses them for the list. Recommended: **fix the docs** — `j`/`k` for list navigation is
-   the more common convention, and `Tab`/`Shift-Tab` can drive the sidebar.
-3. **6-field cron: reject or support?** Recommended: **reject** at validation time.
-4. **restic upgrade ordering** — recommended before Wave 5, as listed above.
+1. **Retention: opt-in per job.** Only prune when a job has a `retention:` block. Existing
+   configs keep growing until the user opts in — no surprise deletions.
+2. **TUI keybindings: fix the docs, not the code.** `j`/`k` stay bound to list navigation;
+   `Tab`/`Shift-Tab` are documented for the sidebar.
+3. **6-field cron: reject at validation time.** A schedule whose seconds field is non-zero
+   fails validation with an explanatory message rather than silently never firing.
+4. **Retention failure: warn and continue.** A prune failure must never invalidate a good
+   snapshot. Log a warning; do not fail the backup.
+
+## Branching strategy
+
+PR #92 (`feat/tui`) is **open and mergeable**, and `src/tui.rs` exists only on that branch.
+Comparing `main` against `feat/tui`, only `src/cli.rs` and `src/lib.rs` differ — every other
+module (`backup.rs`, `scheduler.rs`, `config.rs`, `secrets.rs`, `notifications.rs`, `exclude.rs`,
+`snapshot.rs`, `errors.rs`) is byte-identical.
+
+So the plan branches as follows:
+
+- **Waves 0-4 and 6** (everything except the TUI work) branch from `main`. They touch only
+  byte-identical files, so they merge cleanly and independently of PR #92.
+- **Wave 5** (the TUI PRs) branches from `feat/tui` and targets PR #92's branch, because the
+  TUI module does not exist on `main`. They land after PR #92 merges, or as PRs against
+  `feat/tui` directly.
+- The **ratatui 0.30 upgrade** (PR 19) is TUI-only and therefore also branches from `feat/tui`.
+
+This keeps the two streams independent: the correctness and secrets work can land and be
+released on `main` while PR #92 is still in review.
+
+## Status
+
+| PR | Finding | Branch | State |
+|---|---|---|---|
+| 0 | H8 markdownlint CI | `chore/ci-markdownlint-glob` | **done** — verified |
+| 1+2 | C1 backup counters | `fix/backup-summary-parse` | **done** — verified end-to-end |
+| 3 | C3 retention | `fix/retention-after-backup` | next |
+| 4 | H1 password_key panic | `fix/password-key-mask-panic` | queued |
+| 5 | H10 scheduler deadlock | `fix/scheduler-channel-deadlock` | queued |
+| 6 | H11 cron seconds field | `fix/cron-seconds-field` | queued |
 
 ## Dependency order
 
