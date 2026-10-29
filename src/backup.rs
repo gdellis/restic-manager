@@ -2,9 +2,20 @@ use crate::cli_log::write_cli_output_log;
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
+use crate::redact::redact_credentials;
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info, warn};
+
+/// Build the error for a failed restic invocation from its stderr.
+///
+/// Restic echoes the repository URL verbatim in its stderr, and that
+/// URL can carry credentials (`sftp:user:password@host:/path`). The
+/// stderr text ends up both in the logs and in the Telegram chat, so
+/// the credentials are stripped before the error is created.
+pub fn restic_command_failed(stderr: &str) -> AppError {
+    ResticError::CommandFailed(redact_credentials(stderr)).into()
+}
 
 /// Convert a path to a string suitable for use as a command argument.
 /// Uses to_string_lossy() to handle non-UTF8 paths safely.
@@ -176,7 +187,7 @@ impl Backup {
         dry_run: bool,
         log_file: Option<&std::path::Path>,
     ) -> Result<BackupResult, AppError> {
-        info!(paths = ?paths, "Starting backup to {}", repo);
+        info!(paths = ?paths, "Starting backup to {}", redact_credentials(repo));
 
         let mut args = vec!["backup".to_string()];
 
@@ -197,7 +208,13 @@ impl Backup {
             args.push(path_to_arg(path));
         }
 
-        debug!("Executing: restic {}", args.join(" "));
+        debug!(
+            "Executing: restic {}",
+            args.iter()
+                .map(|a| redact_credentials(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
 
         if dry_run {
             debug!("DRY-RUN flag confirmed in command args");
@@ -297,16 +314,18 @@ impl Backup {
         let stderr_text = stderr_handle.and_then(Self::join_stderr_thread);
 
         if let Some(text) = stderr_text.as_deref() {
-            warn!(stderr = text, "restic wrote to stderr");
+            warn!(stderr = redact_credentials(text), "restic wrote to stderr");
         }
 
         // Write the CLI output log before handling the exit status, so a
         // hard failure (wrong password, network error, unreachable repo)
         // still gets logged - that's exactly the case log_cli_output is
         // most useful for, and it would otherwise be silently skipped by
-        // the early return below.
+        // the early return below. The stderr is redacted first: restic
+        // echoes the repository URL (which can carry credentials) there.
         if let Some(log_path) = log_file {
-            write_cli_output_log(log_path, &lines, stderr_text.as_deref());
+            let redacted_stderr = stderr_text.as_deref().map(redact_credentials);
+            write_cli_output_log(log_path, &lines, redacted_stderr.as_deref());
         }
 
         // Exit code 3: backup completed but some source files could not be
@@ -317,7 +336,7 @@ impl Backup {
         // a few unreadable files was backed up."
         let partial = status.code() == Some(3);
         if !status.success() && !partial {
-            return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
+            return Err(restic_command_failed(&stderr_text.unwrap_or_default()));
         }
 
         let output = lines.join("\n");
@@ -398,8 +417,13 @@ impl Backup {
                     })?;
 
                     if !output.status.success() {
-                        let stderr =
-                            Self::truncate_hook_stderr(&String::from_utf8_lossy(&output.stderr));
+                        // Hook stderr is arbitrary text that may contain
+                        // credentials (e.g. a URL printed by the hook
+                        // script), so it is redacted before being logged
+                        // or propagated into a notification.
+                        let stderr = Self::truncate_hook_stderr(&redact_credentials(
+                            &String::from_utf8_lossy(&output.stderr),
+                        ));
                         if *continue_on_error {
                             warn!(
                                 hook = hook_type,
@@ -434,6 +458,58 @@ mod tests {
     use super::*;
     use crate::config::{Config, Job, Repository as RepoConfig};
     use crate::secrets::Secrets;
+
+    #[test]
+    fn test_restic_command_failed_redacts_repo_credentials() {
+        // Restic echoes the full repository URL - including the
+        // password - in its stderr when the repo is unreachable. That
+        // stderr becomes the error message, which is logged and sent to
+        // the Telegram chat, so the credentials must not survive.
+        let stderr = "Fatal: unable to open repository at \
+                      sftp:user:SECRETPASS@host.invalid:/x: unable to start the sftp session";
+        let message = restic_command_failed(stderr).to_string();
+        assert!(
+            !message.contains("SECRETPASS"),
+            "password must not leak through the error message: {message}"
+        );
+        assert!(
+            message.contains("host.invalid"),
+            "the rest of the URL should still be there: {message}"
+        );
+    }
+
+    #[test]
+    fn test_hook_stderr_redacts_credentials() {
+        // A failing hook's stderr is logged and propagated as an error;
+        // it must not carry credentials either.
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "echo 'sftp:user:SECRETPASS@host.invalid:/x' >&2; exit 1".to_string(),
+            ],
+        );
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd".to_string(),
+            vec![
+                "/C".to_string(),
+                "echo sftp:user:SECRETPASS@host.invalid:/x 1>&2 & exit 1".to_string(),
+            ],
+        );
+        let hooks = vec![Hook::Command {
+            command,
+            args,
+            continue_on_error: false,
+        }];
+        let err = Backup::execute_hooks(&hooks, "pre-backup").expect_err("hook must fail");
+        let message = err.to_string();
+        assert!(
+            !message.contains("SECRETPASS"),
+            "password must not leak through the hook error: {message}"
+        );
+    }
 
     #[test]
     fn test_truncate_hook_stderr_short_text_unchanged() {

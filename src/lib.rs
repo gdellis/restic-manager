@@ -5,6 +5,7 @@ pub mod config;
 pub mod errors;
 pub mod exclude;
 pub mod notifications;
+pub mod redact;
 pub mod repository;
 pub mod restore;
 pub mod scheduler;

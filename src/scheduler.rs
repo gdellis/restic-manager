@@ -3,6 +3,7 @@ use crate::config::Job;
 use crate::config::ResolvedConfig;
 use crate::errors::AppError;
 use crate::notifications::NotificationManager;
+use crate::redact::redact_credentials;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Timelike;
@@ -326,9 +327,14 @@ impl Scheduler {
                 }
             }
             Ok(Err(e)) => {
-                error!(job = %name, error = %e, "Backup failed");
+                // The error text can contain the repository URL (restic
+                // echoes it in its stderr), and that URL can carry
+                // credentials. Redact it before it is logged or sent to
+                // the Telegram chat.
+                let error_text = redact_error(&e);
+                error!(job = %name, error = %error_text, "Backup failed");
                 if let Some(ref n) = notifier {
-                    if let Err(notify_err) = n.notify_failure(&name, &e.to_string()).await {
+                    if let Err(notify_err) = n.notify_failure(&name, &error_text).await {
                         warn!(job = %name, error = %notify_err, "Failed to send failure notification");
                     }
                 }
@@ -368,12 +374,41 @@ impl Scheduler {
     }
 }
 
+/// Render an error for logging and notification, with any credentials
+/// embedded in a repository URL redacted.
+///
+/// The error text of a failed backup can contain the repository URL
+/// (restic echoes it in its stderr) and that URL can carry a password.
+/// Both the systemd journal and the Telegram chat are outside the
+/// user's control, so the credentials are stripped here - once, before
+/// the text is handed to either.
+pub fn redact_error(err: &AppError) -> String {
+    redact_credentials(&err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, Job, Repository as RepoConfig};
     use crate::secrets::Secrets;
     use chrono::TimeZone;
+
+    #[test]
+    fn test_redact_error_removes_repo_credentials() {
+        // The scheduler logs this text and sends it to the Telegram
+        // chat, so the password must not survive.
+        let err = AppError::Restic(crate::errors::ResticError::CommandFailed(
+            "Fatal: unable to open repository at \
+             sftp:user:SECRETPASS@host.invalid:/x: unable to start the sftp session"
+                .to_string(),
+        ));
+        let text = redact_error(&err);
+        assert!(
+            !text.contains("SECRETPASS"),
+            "password must not reach the log or the Telegram chat: {text}"
+        );
+        assert!(text.contains("host.invalid"), "{text}");
+    }
 
     fn test_config() -> ResolvedConfig {
         let mut repositories = std::collections::BTreeMap::new();
