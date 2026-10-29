@@ -93,6 +93,47 @@ pub struct BackupResult {
     pub errors_count: u64,
 }
 
+/// The subset of restic's flat summary object that the tool reports on.
+///
+/// restic emits the counters at the top level of the summary message:
+///
+/// ```json
+/// {"message_type":"summary","files_new":1,"files_changed":0,...,
+///  "total_duration":0.239729821,"snapshot_id":"..."}
+/// ```
+///
+/// Deserializing into a typed struct means a change in restic's schema
+/// surfaces as a parse error rather than a silently zeroed counter.
+/// Every field has a default so that a *new* restic field being added is
+/// not an error, but a *removed or renamed* one is.
+#[derive(Debug, serde::Deserialize)]
+struct ResticSummary {
+    #[serde(default)]
+    files_new: u32,
+    #[serde(default)]
+    files_changed: u32,
+    #[serde(default)]
+    files_unmodified: u32,
+    #[serde(default)]
+    dirs_new: u32,
+    #[serde(default)]
+    dirs_changed: u32,
+    #[serde(default)]
+    dirs_unmodified: u32,
+    #[serde(default)]
+    data_blobs: u32,
+    #[serde(default)]
+    tree_blobs: u32,
+    #[serde(default)]
+    data_added: u64,
+    /// restic names this field `total_duration`; there is no `duration`.
+    #[serde(default)]
+    total_duration: f64,
+    #[serde(default)]
+    snapshot_id: Option<String>,
+}
+
+
 pub struct Backup;
 
 impl Backup {
@@ -338,30 +379,27 @@ impl Backup {
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
-        let lines: Vec<&str> = output.lines().collect();
-        let summary_line = lines
-            .iter()
-            .find(|l| l.contains("\"summary\""))
+        let summary_line = output
+            .lines()
+            .find(|l| l.contains(r#""message_type":"summary""#))
             .ok_or_else(|| AppError::Other("No summary in backup output".into()))?;
 
-        let json: serde_json::Value = serde_json::from_str(summary_line)
+        let summary: ResticSummary = serde_json::from_str(summary_line)
             .map_err(|e| AppError::Other(format!("Failed to parse backup JSON: {}", e)))?;
-
-        let summary = &json["summary"];
 
         Ok(BackupResult {
             job_name: String::new(),
-            snapshot_id: json["snapshot_id"].as_str().map(String::from),
-            files_new: summary["files_new"].as_u64().unwrap_or(0) as u32,
-            files_changed: summary["files_changed"].as_u64().unwrap_or(0) as u32,
-            files_unmodified: summary["files_unmodified"].as_u64().unwrap_or(0) as u32,
-            dirs_new: summary["dirs_new"].as_u64().unwrap_or(0) as u32,
-            dirs_changed: summary["dirs_changed"].as_u64().unwrap_or(0) as u32,
-            dirs_unmodified: summary["dirs_unmodified"].as_u64().unwrap_or(0) as u32,
-            data_blobs: summary["data_blobs"].as_u64().unwrap_or(0) as u32,
-            tree_blobs: summary["tree_blobs"].as_u64().unwrap_or(0) as u32,
-            data_added: summary["data_added"].as_u64().unwrap_or(0),
-            duration_secs: summary["duration"].as_f64().unwrap_or(0.0),
+            snapshot_id: summary.snapshot_id,
+            files_new: summary.files_new,
+            files_changed: summary.files_changed,
+            files_unmodified: summary.files_unmodified,
+            dirs_new: summary.dirs_new,
+            dirs_changed: summary.dirs_changed,
+            dirs_unmodified: summary.dirs_unmodified,
+            data_blobs: summary.data_blobs,
+            tree_blobs: summary.tree_blobs,
+            data_added: summary.data_added,
+            duration_secs: summary.total_duration,
             partial: false,
             errors_count: 0,
         })
@@ -602,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_parse_backup_output_valid() {
-        let json = r#"{"summary":{"files_new":1,"files_changed":2,"files_unmodified":3,"dirs_new":1,"dirs_changed":0,"dirs_unmodified":2,"data_blobs":5,"tree_blobs":3,"data_added":1024,"duration":1.5},"snapshot_id":"abc123"}"#;
+        let json = r#"{"message_type":"summary","files_new":1,"files_changed":2,"files_unmodified":3,"dirs_new":1,"dirs_changed":0,"dirs_unmodified":2,"data_blobs":5,"tree_blobs":3,"data_added":1024,"total_duration":1.5,"snapshot_id":"abc123"}"#;
         let result = Backup::parse_backup_output(json);
         assert!(result.is_ok());
         let r = result.unwrap();
@@ -697,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_parse_backup_output_missing_fields() {
-        let json = r#"{"summary":{}}"#;
+        let json = r#"{"message_type":"summary"}"#;
         let result = Backup::parse_backup_output(json);
         assert!(result.is_ok());
         let r = result.unwrap();
@@ -711,7 +749,7 @@ mod tests {
         // parse_backup_output has no notion of the process exit code, so
         // `partial` must always come back false here - execute_backup is
         // responsible for setting it based on the exit status afterward.
-        let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
+        let json = r#"{"message_type":"summary","files_new":1,"snapshot_id":"abc123"}"#;
         let result = Backup::parse_backup_output(json).unwrap();
         assert!(!result.partial);
     }
@@ -721,7 +759,7 @@ mod tests {
         // Same reasoning as partial: errors_count comes from "status"
         // messages tracked during the run, not the final summary, so
         // parse_backup_output alone must always return 0.
-        let json = r#"{"summary":{"files_new":1},"snapshot_id":"abc123"}"#;
+        let json = r#"{"message_type":"summary","files_new":1,"snapshot_id":"abc123"}"#;
         let result = Backup::parse_backup_output(json).unwrap();
         assert_eq!(result.errors_count, 0);
     }
