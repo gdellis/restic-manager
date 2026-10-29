@@ -305,7 +305,6 @@ second 0 and all do fire. Verified against the crate:
 The implementation asks the cron crate itself (via a probe schedule against a known instant)
 rather than re-implementing cron field grammar.
 
-
 ## Dependency order
 
 ```
