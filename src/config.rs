@@ -1,9 +1,11 @@
 use crate::errors::ConfigError;
+use crate::redact::contains_credentials;
 use crate::secrets::Secrets;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +117,19 @@ impl Repository {
         }
         if self.password_key.trim().is_empty() {
             errors.push("empty password_key".to_string());
+        }
+
+        // A repository URL with inline credentials is a secret in
+        // plaintext config: it ends up in the process argument list, in
+        // restic's stderr, and - before redaction - in the logs and the
+        // Telegram chat. Warn about it so the user can move it into
+        // the secrets file instead.
+        if contains_credentials(&self.repo) {
+            warn!(
+                repository = name,
+                "repository URL contains embedded credentials; they are redacted from \
+                 logs and notifications, but storing them in the secrets file is safer"
+            );
         }
 
         if errors.is_empty() {
