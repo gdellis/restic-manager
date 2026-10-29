@@ -248,14 +248,63 @@ released on `main` while PR #92 is still in review.
 
 ## Status
 
+Branches live in the repo; each teammate worked in its own `git worktree` sandbox under
+`.omo/session-work/`. Nothing is pushed or merged - PRs need the maintainer's go-ahead.
+
 | PR | Finding | Branch | State |
 |---|---|---|---|
 | 0 | H8 markdownlint CI | `chore/ci-markdownlint-glob` | **done** — verified |
 | 1+2 | C1 backup counters | `fix/backup-summary-parse` | **done** — verified end-to-end |
-| 3 | C3 retention | `fix/retention-after-backup` | next |
-| 4 | H1 password_key panic | `fix/password-key-mask-panic` | queued |
-| 5 | H10 scheduler deadlock | `fix/scheduler-channel-deadlock` | queued |
-| 6 | H11 cron seconds field | `fix/cron-seconds-field` | queued |
+| 3 | C3 + M19 retention | `fix/retention-after-backup` | **done** — verified end-to-end |
+| 4 | H1 password_key panic | `fix/password-key-mask-panic` | **done** — based on `feat/tui` |
+| 5 | H10 scheduler deadlock | `fix/scheduler-channel-deadlock` | in progress |
+| 6 | H11 cron seconds field | `fix/cron-seconds-field` | **done** — verified |
+| 7 | H9 + M21 + M13 + M14 | `fix/secret-handling-hardening` | **done** — 4 commits, verified |
+
+### Base-branch correction
+
+**H1 (`password_key` panic) exists only on `feat/tui`, not on `main`.** `main` has no `show`
+subcommand, so the masking code was introduced by the TUI branch. That fix is therefore based on
+`feat/tui` and targets PR #92's branch, not `main`.
+
+### Verification performed
+
+Each fix was checked three ways, not just by unit test:
+
+- **Red state.** The new tests were confirmed to fail against the pre-fix code. For the cron fix,
+  stubbing the helper made exactly the 2 rejection tests fail while the acceptance tests still
+  passed. For the secret fixes, neutering the redaction failed 7 tests.
+- **CI gate.** `cargo build --all-targets`, `cargo test --all-targets`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`.
+- **Real surface QA** with the actual binary against real `restic`:
+  - C1 — old binary reported `0 new, data_added=0`; new binary reported `2 unchanged files,
+    data_added=368` on identical input.
+  - C3 — a job with `keep_last: 1` leaves exactly 1 snapshot after 3 backups; a job without a
+    retention block leaves all 3.
+  - M21 — a repo URL `sftp:user:SECRETPASS@host.invalid:/x` is logged as
+    `sftp:***@host.invalid:/x`; `SECRETPASS` appears 0 times in the output, and a config-time
+    warning fires.
+
+### Edge case found during the cron fix
+
+A naive `seconds != "0"` comparison would have wrongly rejected valid schedules. The cron crate
+treats the seconds field as a **set**: `"00"`, `"*"`, `"*/5"`, `"0-30"` and `"0,15"` all include
+second 0 and all do fire. Verified against the crate:
+
+```
+0        matches@sec0=true   -> ACCEPT
+00       matches@sec0=true   -> ACCEPT   (a literal "!=\"0\"" check would REJECT)
+*        matches@sec0=true   -> ACCEPT
+*/5      matches@sec0=true   -> ACCEPT
+0-30     matches@sec0=true   -> ACCEPT
+0,15     matches@sec0=true   -> ACCEPT
+30       matches@sec0=false  -> REJECT
+1-30/5   matches@sec0=false  -> REJECT
+```
+
+The implementation asks the cron crate itself (via a probe schedule against a known instant)
+rather than re-implementing cron field grammar.
+
 
 ## Dependency order
 
