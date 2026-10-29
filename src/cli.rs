@@ -313,12 +313,7 @@ pub fn cli_run() -> Result<(), AppError> {
                 } else {
                     println!("Repository '{}' details:", name);
                     println!("  repo: {}", repo.repo);
-                    let masked = if repo.password_key.len() > 2 {
-                        format!("{}***", &repo.password_key[..2])
-                    } else {
-                        "***".to_string()
-                    };
-                    println!("  password_key: {}", masked);
+                    println!("  password_key: {}", mask_password_key(&repo.password_key));
                     if let Some(log_cli_output) = &repo.log_cli_output {
                         println!("  log_cli_output: {}", log_cli_output.display());
                     }
@@ -328,6 +323,19 @@ pub fn cli_run() -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+/// Mask a repository password key for display: the first two characters
+/// followed by `***`. Keys of two characters or fewer are fully masked.
+///
+/// Slices by CHARACTER, not by byte, so a key that starts with a
+/// multi-byte UTF-8 character cannot panic on a non-char-boundary index.
+fn mask_password_key(key: &str) -> String {
+    if key.chars().count() > 2 {
+        format!("{}***", key.chars().take(2).collect::<String>())
+    } else {
+        "***".to_string()
+    }
 }
 
 /// Build a filter from a `RUST_LOG`-style directive string, with
@@ -362,6 +370,7 @@ fn build_env_filter() -> tracing_subscriber::EnvFilter {
 #[cfg(test)]
 mod tests {
     use super::filter_from_directive;
+    use super::mask_password_key;
     use super::{Cli, Commands};
     use clap::Parser;
     use std::sync::Mutex;
@@ -395,6 +404,37 @@ mod tests {
         // to default info level, with a warning to stderr.
         let filter = filter_from_directive("foo=bar");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
+    }
+
+    #[test]
+    fn mask_password_key_ascii_shows_first_two_chars() {
+        assert_eq!(mask_password_key("abcdef"), "ab***");
+    }
+
+    #[test]
+    fn mask_password_key_short_keys_are_fully_masked() {
+        assert_eq!(mask_password_key(""), "***");
+        assert_eq!(mask_password_key("a"), "***");
+        assert_eq!(mask_password_key("ab"), "***");
+    }
+
+    #[test]
+    fn mask_password_key_multibyte_leading_char_does_not_panic() {
+        // Regression: the mask used to slice by BYTE index (`&key[..2]`),
+        // which panicked with "byte index 2 is not a char boundary" when
+        // the key started with a multi-byte UTF-8 character.
+        assert_eq!(mask_password_key("→key"), "→k***");
+        assert_eq!(mask_password_key("ékey"), "ék***");
+        // Multi-byte character occupying the whole prefix.
+        assert_eq!(mask_password_key("→→→"), "→→***");
+    }
+
+    #[test]
+    fn mask_password_key_multibyte_only_key_is_fully_masked() {
+        // One multi-byte character is at most two characters, so nothing
+        // of it is revealed.
+        assert_eq!(mask_password_key("→"), "***");
+        assert_eq!(mask_password_key("→→"), "***");
     }
 
     #[test]
