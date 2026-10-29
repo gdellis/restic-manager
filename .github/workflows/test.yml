@@ -34,7 +34,11 @@ jobs:
         id: changed-files
         with:
           files: '**/*.md'
-          separator: ","
+          # The markdownlint-cli2 action splits its `globs` input on newlines by
+          # default. Emitting a comma-joined list made it treat the whole string
+          # as a single glob pattern, which matched nothing - the job reported
+          # "0 files linted" and always passed.
+          separator: "\n"
 
       - name: Lint Markdown
         uses: DavidAnson/markdownlint-cli2-action@07035fd053f7be764496c0f8d8f9f41f98305101 # v22.0.0
