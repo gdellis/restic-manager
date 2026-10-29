@@ -253,19 +253,42 @@ Branches live in the repo; each teammate worked in its own `git worktree` sandbo
 
 | PR | Finding | Branch | State |
 |---|---|---|---|
-| 0 | H8 markdownlint CI | `chore/ci-markdownlint-glob` | **done** — verified |
-| 1+2 | C1 backup counters | `fix/backup-summary-parse` | **done** — verified end-to-end |
-| 3 | C3 + M19 retention | `fix/retention-after-backup` | **done** — verified end-to-end |
-| 4 | H1 password_key panic | `fix/password-key-mask-panic` | **done** — based on `feat/tui` |
-| 5 | H10 scheduler deadlock | `fix/scheduler-channel-deadlock` | in progress |
-| 6 | H11 cron seconds field | `fix/cron-seconds-field` | **done** — verified |
-| 7 | H9 + M21 + M13 + M14 | `fix/secret-handling-hardening` | **done** — 4 commits, verified |
+| #102 | H8 markdownlint CI | `chore/ci-markdownlint-glob` | **open** — verified |
+| #103 | C1 backup counters | `fix/backup-summary-parse` | **open** — verified end-to-end |
+| #104 | C3 + M19 retention | `fix/retention-after-backup` | **open** — verified end-to-end |
+| #108 | H1 password_key panic | `fix/password-key-mask-panic` | **open** — based on `feat/tui`, no CI |
+| #107 | H10 scheduler deadlock | `fix/scheduler-channel-deadlock` | **open** — verified |
+| #105 | H11 cron seconds field | `fix/cron-seconds-field` | **open** — verified |
+| #106 | H9 + M21 + M13 + M14 | `fix/secret-handling-hardening` | **open** — 4 commits, verified |
+| #109 | this document | `review/audit-2026-10` | **open** — docs only |
+
+All eight are `MERGEABLE / CLEAN` with CI green, **none merged** — merging needs the
+maintainer's approval.
+
+Earlier PR numbers (#93–#99, #101) were closed and replaced by the numbers above: the commit
+authors were rewritten to `gdellis@pm.me` so GitHub attributes them to the repository owner
+rather than to an unrelated account that happened to own the agent email address. The diffs are
+byte-identical (tree hashes verified unchanged).
 
 ### Base-branch correction
 
 **H1 (`password_key` panic) exists only on `feat/tui`, not on `main`.** `main` has no `show`
 subcommand, so the masking code was introduced by the TUI branch. That fix is therefore based on
 `feat/tui` and targets PR #92's branch, not `main`.
+
+**PR #108 runs no CI.** Every workflow triggers on `pull_request: branches: [main]`, so a PR
+targeting `feat/tui` gets no checks. The fix is verified locally (all four CI commands plus a
+real-binary reproduction), but it is not machine-checked on GitHub. Either merge it into the
+branch of PR 92 or widen the workflow trigger to include `feat/tui`.
+
+### Remaining work
+
+- **Wave 3** — H7: `restic` is orphaned on SIGTERM, leaving the repository locked.
+- **Wave 5** — the TUI findings (H2, H3, H4, H5, H6, M10-M12), which branch from `feat/tui`.
+  M10 (have the TUI call the library instead of spawning itself) dissolves H2 and H3 at once
+  and should come first.
+- **Wave 6** — H13 (path traversal), H12, M17, M18, M2, M3, and the low-severity batch.
+- **The UI brainstorm** — still outstanding, and PR #109's plan references it.
 
 ### Verification performed
 
