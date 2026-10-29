@@ -613,6 +613,76 @@ mod tests {
         assert_eq!(r.snapshot_id, Some("abc123".to_string()));
     }
 
+    /// Verbatim restic 0.16.4 summary line, captured from
+    /// `restic backup --json` against a real repository with one new file.
+    ///
+    /// restic emits a FLAT summary: the counters sit at the top level of the
+    /// object, there is no nested `"summary"` object, and the duration field
+    /// is named `total_duration` (not `duration`). Fixtures for this parser
+    /// must be captured from real restic output rather than hand-written, so
+    /// that a change in restic's schema shows up as a failing test instead of
+    /// a silently-zeroed counter.
+    const RESTIC_SUMMARY_NEW_FILES: &str = r#"{"message_type":"summary","files_new":1,"files_changed":0,"files_unmodified":0,"dirs_new":3,"dirs_changed":0,"dirs_unmodified":0,"data_blobs":1,"tree_blobs":4,"data_added":201505,"total_files_processed":1,"total_bytes_processed":200000,"total_duration":0.239729821,"snapshot_id":"230c398268fccf0cc131c3d7b3a894f17f32c783da0261eee091adb5a3ecf600"}"#;
+
+    /// Verbatim restic 0.16.4 summary line for a second run over the same
+    /// repository, where one file was added and one was left unmodified.
+    const RESTIC_SUMMARY_ONE_NEW_ONE_UNMODIFIED: &str = r#"{"message_type":"summary","files_new":1,"files_changed":0,"files_unmodified":1,"dirs_new":0,"dirs_changed":3,"dirs_unmodified":0,"data_blobs":1,"tree_blobs":4,"data_added":101876,"total_files_processed":2,"total_bytes_processed":300000,"total_duration":0.241418635,"snapshot_id":"d3c67e957ae68c8e6875a15b0f76e6f9ff612f18f5e9aa35b29a2751cce5f8f4"}"#;
+
+    #[test]
+    fn test_parse_backup_output_reads_verbatim_restic_summary() {
+        let r = Backup::parse_backup_output(RESTIC_SUMMARY_NEW_FILES).unwrap();
+        assert_eq!(r.files_new, 1);
+        assert_eq!(r.files_changed, 0);
+        assert_eq!(r.files_unmodified, 0);
+        assert_eq!(r.dirs_new, 3);
+        assert_eq!(r.dirs_changed, 0);
+        assert_eq!(r.dirs_unmodified, 0);
+        assert_eq!(r.data_blobs, 1);
+        assert_eq!(r.tree_blobs, 4);
+        assert_eq!(r.data_added, 201_505);
+        assert_eq!(
+            r.snapshot_id.as_deref(),
+            Some("230c398268fccf0cc131c3d7b3a894f17f32c783da0261eee091adb5a3ecf600")
+        );
+    }
+
+    #[test]
+    fn test_parse_backup_output_reads_total_duration_not_duration() {
+        // restic names the field `total_duration`; a parser looking for
+        // `duration` silently reports a zero-length backup.
+        let r = Backup::parse_backup_output(RESTIC_SUMMARY_NEW_FILES).unwrap();
+        assert!(
+            r.duration_secs > 0.0,
+            "expected a non-zero duration, got {}",
+            r.duration_secs
+        );
+    }
+
+    #[test]
+    fn test_parse_backup_output_reads_verbatim_restic_summary_second_run() {
+        let r = Backup::parse_backup_output(RESTIC_SUMMARY_ONE_NEW_ONE_UNMODIFIED).unwrap();
+        assert_eq!(r.files_new, 1);
+        assert_eq!(r.files_unmodified, 1);
+        assert_eq!(r.dirs_changed, 3);
+        assert_eq!(r.data_added, 101_876);
+    }
+
+    #[test]
+    fn test_parse_backup_output_finds_summary_among_other_lines() {
+        // A real backup emits many JSON lines (status, verbose_status,
+        // node). The summary line must be picked out of them, and a filename
+        // that happens to contain the word "summary" must not confuse it.
+        let output = format!(
+            "{}\n{}\n{}\n",
+            r#"{"message_type":"status","percent_done":0.5,"total_files":10}"#,
+            RESTIC_SUMMARY_NEW_FILES,
+            r#"{"message_type":"verbose_status","message":"saved summary of /data/report-summary.txt"}"#
+        );
+        let r = Backup::parse_backup_output(&output).unwrap();
+        assert_eq!(r.files_new, 1);
+        assert_eq!(r.data_added, 201_505);
+    }
+
     #[test]
     fn test_parse_backup_output_no_summary() {
         let result = Backup::parse_backup_output("not json");
