@@ -133,7 +133,6 @@ struct ResticSummary {
     snapshot_id: Option<String>,
 }
 
-
 pub struct Backup;
 
 impl Backup {
