@@ -42,8 +42,14 @@ pub struct Notifications {
     client: Client,
     bot_token: Option<String>,
     chat_id: Option<String>,
+    /// Base URL of the Telegram Bot API. Overridable in tests so a
+    /// failing request can be provoked without touching the real API.
+    api_base: String,
     rate_limiter: Mutex<RateLimiter>,
 }
+
+/// Base URL of the Telegram Bot API.
+const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
 struct RateLimiter {
     last_failure_notification: Option<std::time::Instant>,
@@ -69,11 +75,22 @@ impl Notifications {
                 .unwrap_or_else(|_| Client::new()),
             bot_token: telegram.and_then(|t| t.bot_token.clone()),
             chat_id: telegram.and_then(|t| t.chat_id.clone()),
+            api_base: TELEGRAM_API_BASE.to_string(),
             rate_limiter: Mutex::new(RateLimiter {
                 last_failure_notification: None,
                 last_success_notification: None,
             }),
         }
+    }
+
+    /// Test-only constructor pointing the sender at a different API
+    /// base URL, so a transport failure can be provoked without
+    /// contacting the real Telegram API.
+    #[cfg(test)]
+    fn with_api_base(config: &ResolvedConfig, api_base: &str) -> Self {
+        let mut notifications = Self::new(config);
+        notifications.api_base = api_base.to_string();
+        notifications
     }
 
     /// Returns true if both a bot token and chat id were resolved from
@@ -203,6 +220,20 @@ impl Notifications {
         format!("{}{}", &message[..end], suffix)
     }
 
+    /// Wrap a transport failure into `NotificationError` without the
+    /// request URL.
+    ///
+    /// The Telegram API URL embeds the bot token
+    /// (`https://api.telegram.org/bot<token>/sendMessage`) and
+    /// `reqwest::Error`'s `Display` includes the URL, so wrapping the
+    /// error as-is writes the bot token into the systemd journal (via
+    /// the scheduler's `warn!`/`error!` logging) and into any Telegram
+    /// notification built from that error text. `without_url()` strips
+    /// the URL from the error while keeping the underlying cause.
+    fn scrub_request_error(err: reqwest::Error) -> NotificationError {
+        NotificationError::RequestFailed(err.without_url())
+    }
+
     async fn send_telegram(&self, message: &str) -> Result<(), AppError> {
         let bot_token = self
             .bot_token
@@ -213,7 +244,7 @@ impl Notifications {
             .as_ref()
             .ok_or(NotificationError::NotConfigured)?;
 
-        let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+        let url = format!("{}/bot{}/sendMessage", self.api_base, bot_token);
         let message = Self::truncate_for_telegram(message);
 
         let params = [("chat_id", chat_id.as_str()), ("text", message.as_str())];
@@ -224,7 +255,7 @@ impl Notifications {
             .form(&params)
             .send()
             .await
-            .map_err(NotificationError::RequestFailed)?;
+            .map_err(Self::scrub_request_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -478,6 +509,58 @@ mod tests {
         });
 
         assert!(handle.await.is_ok(), "notification task should not panic");
+    }
+
+    #[tokio::test]
+    async fn test_request_failure_does_not_leak_bot_token_in_error() {
+        // Regression test: the Telegram API URL embeds the bot token and
+        // reqwest's error Display includes the request URL. Without
+        // scrubbing, a transport failure writes the bot token into the
+        // systemd journal (and into any notification built from this
+        // error text).
+        use crate::secrets::{Secrets, TelegramConfig};
+        let mut config = test_config();
+        config.secrets = Secrets {
+            values: std::collections::HashMap::new(),
+            telegram: Some(TelegramConfig {
+                bot_token: Some("SECRET_BOT_TOKEN".to_string()),
+                chat_id: Some("test-chat".to_string()),
+            }),
+        };
+
+        // Port 1 on loopback refuses connections, so the request fails
+        // locally without any network egress.
+        let notifications = Notifications::with_api_base(&config, "http://127.0.0.1:1");
+        let err = notifications
+            .send_failure("test-job", "boom")
+            .await
+            .expect_err("request to a closed port must fail");
+
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("SECRET_BOT_TOKEN"),
+            "bot token must not appear in the notification error: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scrub_request_error_strips_url() {
+        // The error type carries a URL-bearing reqwest error; the
+        // scrubbed variant must not render that URL.
+        let reqwest_error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/botSECRET_BOT_TOKEN/sendMessage")
+            .send()
+            .await
+            .expect_err("connection to a closed port must fail");
+        assert!(
+            reqwest_error.to_string().contains("SECRET_BOT_TOKEN"),
+            "precondition: reqwest includes the URL in its Display"
+        );
+        let scrubbed = Notifications::scrub_request_error(reqwest_error);
+        assert!(
+            !scrubbed.to_string().contains("SECRET_BOT_TOKEN"),
+            "scrubbed error must not contain the token: {scrubbed}"
+        );
     }
 
     #[test]
