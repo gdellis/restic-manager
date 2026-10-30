@@ -1,9 +1,11 @@
 use crate::errors::ConfigError;
+use crate::redact::contains_credentials;
 use crate::secrets::Secrets;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +117,19 @@ impl Repository {
         }
         if self.password_key.trim().is_empty() {
             errors.push("empty password_key".to_string());
+        }
+
+        // A repository URL with inline credentials is a secret in
+        // plaintext config: it ends up in the process argument list, in
+        // restic's stderr, and - before redaction - in the logs and the
+        // Telegram chat. Warn about it so the user can move it into
+        // the secrets file instead.
+        if contains_credentials(&self.repo) {
+            warn!(
+                repository = name,
+                "repository URL contains embedded credentials; they are redacted from \
+                 logs and notifications, but storing them in the secrets file is safer"
+            );
         }
 
         if errors.is_empty() {
@@ -300,7 +315,12 @@ impl ResolvedConfig {
         let mut missing: Vec<String> = Vec::new();
 
         for (repo_name, repo) in &self.config.repositories {
-            if self.secrets.get(&repo.password_key).is_none() {
+            // A key that is present but set to the empty string is as
+            // good as missing: restic would be handed an empty
+            // RESTIC_PASSWORD and fail with a misleading "wrong
+            // password" instead of "the secret isn't configured".
+            let secret = self.secrets.get(&repo.password_key);
+            if secret.is_none_or(|v| v.is_empty()) {
                 missing.push(format!(
                     "Repository '{}' references missing secret key '{}'",
                     repo_name, repo.password_key
@@ -655,6 +675,48 @@ jobs:
             secrets: Secrets::default(),
         };
         assert!(resolved.validate_secrets().is_err());
+    }
+
+    #[test]
+    fn test_resolved_config_validation_rejects_empty_password_secret() {
+        // A secret key that is present but empty is as good as missing:
+        // restic would receive RESTIC_PASSWORD= and fail with a
+        // misleading "wrong password" instead of a clear config error.
+        let mut repositories = BTreeMap::new();
+        repositories.insert(
+            "test-repo".to_string(),
+            Repository {
+                repo: "/tmp/test-repo".to_string(),
+                password_key: "test-password".to_string(),
+                log_cli_output: None,
+            },
+        );
+        let mut jobs = BTreeMap::new();
+        jobs.insert(
+            "test-job".to_string(),
+            Job {
+                repository: "test-repo".to_string(),
+                paths: vec!["/tmp".into()],
+                ..Default::default()
+            },
+        );
+        let mut secrets_values = HashMap::new();
+        secrets_values.insert("test-password".to_string(), String::new());
+
+        let resolved = ResolvedConfig {
+            config: Config { repositories, jobs },
+            secrets: Secrets {
+                values: secrets_values,
+                telegram: None,
+            },
+        };
+
+        let err = resolved
+            .validate_secrets()
+            .expect_err("an empty secret must be reported as missing")
+            .to_string();
+        assert!(err.contains("Missing secrets"), "{err}");
+        assert!(err.contains("test-password"), "{err}");
     }
 
     #[test]

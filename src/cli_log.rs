@@ -48,6 +48,10 @@ pub fn write_cli_output_log(log_path: &Path, stdout_lines: &[String], stderr: Op
 /// `Vec<String>` / `Option<&str>` shape `write_cli_output_log` wants,
 /// then call it. No-op when `log_path` is `None`. Used by `repository`
 /// and `snapshot` so each module doesn't have to re-implement the split.
+///
+/// The stderr is redacted before it is written: restic echoes the
+/// repository URL - which can carry credentials - in its stderr, and
+/// this file lands on disk in the user's log directory.
 pub fn write_command_output(log_path: Option<&Path>, output: &Output) {
     let Some(path) = log_path else { return };
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -56,7 +60,7 @@ pub fn write_command_output(log_path: Option<&Path>, output: &Output) {
     let stderr_str = if stderr.is_empty() {
         None
     } else {
-        Some(stderr.into_owned())
+        Some(crate::redact::redact_credentials(&stderr))
     };
     write_cli_output_log(path, &lines, stderr_str.as_deref());
 }
