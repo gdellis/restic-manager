@@ -239,9 +239,9 @@ impl Scheduler {
         // degraded to logs here: the drain must keep waiting on the
         // remaining tasks, and per-job failures were already reported via
         // notifications. A second signal during the drain force-exits
-        // immediately so an operator isn't held hostage by a long backup,
-        // at the cost of possibly leaving a stale restic lock. 130 is used
-        // as a conventional "interrupted" exit code for either signal.
+        // immediately so an operator isn't held hostage by a long backup.
+        // 130 is used as a conventional "interrupted" exit code for either
+        // signal.
         let force_exit = Self::shutdown_signal();
         tokio::pin!(force_exit);
         // Logged only after the force-exit handler is armed, mirroring the
@@ -259,12 +259,11 @@ impl Scheduler {
                 },
                 _ = &mut force_exit => {
                     warn!("Second shutdown signal received, exiting without waiting for in-flight jobs");
-                    // process::exit skips destructors, so flush explicitly:
-                    // the warn line above must not be lost if the log writer
-                    // ever becomes buffered.
-                    use std::io::Write;
-                    let _ = std::io::stderr().flush();
-                    std::process::exit(130);
+                    // Terminate the in-flight `restic` child before going
+                    // away: process::exit skips destructors, so it would
+                    // otherwise survive the daemon and keep the repository
+                    // locked.
+                    crate::shutdown::exit_interrupted();
                 }
             }
         }
