@@ -15,6 +15,42 @@
 /// Replacement used in place of a URL's userinfo component.
 const REDACTED: &str = "***";
 
+/// Text that is guaranteed to have had any embedded repository
+/// credentials redacted.
+///
+/// The only way to build one is [`RedactedText::new`], which redacts on
+/// the way in. Holding this type instead of a `String` means a password
+/// cannot reach an error, a log line, or a notification by accident:
+/// there is exactly one place where redaction happens, and it happens
+/// before the text can be shown to anyone.
+pub struct RedactedText(String);
+
+impl RedactedText {
+    /// Redact any credentials embedded in `text`.
+    pub fn new(text: &str) -> Self {
+        Self(redact_credentials(text))
+    }
+
+    /// The redacted text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RedactedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// `Debug` prints the same redacted value as `Display`, so formatting an
+// error with `{:?}` cannot reveal what `{}` would hide.
+impl std::fmt::Debug for RedactedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
 /// Returns true if `text` contains a URL with an embedded userinfo
 /// component (i.e. `scheme:[//]something@host`).
 pub fn contains_credentials(text: &str) -> bool {
@@ -107,22 +143,48 @@ fn redact_token(token: &str) -> Option<String> {
     Some(out)
 }
 
-/// Byte index just past the `scheme:` prefix of `token`, if it has one.
+/// Byte index just past a `scheme:` prefix within `token`, if it has one.
+///
+/// The scheme does not have to start the token: restic and the tools
+/// around it may quote the URL (`"sftp:user:pass@host"`) or prefix it
+/// with a key (`url=sftp:user:pass@host`). Those shapes still carry the
+/// credentials, so the token is scanned for the first colon whose
+/// preceding characters form a valid scheme.
 fn scheme_end(token: &str) -> Option<usize> {
-    let colon = token.find(':')?;
-    let scheme = &token[..colon];
-    if scheme.is_empty() {
-        return None;
+    for (colon, ch) in token.char_indices() {
+        if ch != ':' {
+            continue;
+        }
+        // Walk back over the run of scheme characters immediately
+        // before the colon; whatever precedes that run ends the scheme.
+        let start = token[..colon]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !is_scheme_char(*c))
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+
+        let scheme = &token[start..colon];
+        if scheme.is_empty() {
+            continue;
+        }
+        let mut chars = scheme.chars();
+        let first = chars.next()?;
+        if !first.is_ascii_alphabetic() {
+            continue;
+        }
+        if !chars.all(is_scheme_char) {
+            continue;
+        }
+        return Some(colon + 1);
     }
-    let mut chars = scheme.chars();
-    let first = chars.next()?;
-    if !first.is_ascii_alphabetic() {
-        return None;
-    }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
-        return None;
-    }
-    Some(colon + 1)
+    None
+}
+
+/// Whether `c` may appear in a URI scheme (RFC 3986: alphanumeric, `+`,
+/// `-`, `.`).
+fn is_scheme_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'
 }
 
 #[cfg(test)]
@@ -157,6 +219,39 @@ mod tests {
     fn test_leaves_plain_text_unchanged() {
         let text = "Fatal: unable to start the sftp session";
         assert_eq!(redact_credentials(text), text);
+    }
+
+    #[test]
+    fn test_redacts_quoted_url() {
+        // A quoted URL is still a URL: the password must not survive
+        // just because the token starts with a quote character.
+        let text = r#"could not open "sftp:user:SECRETPASS@host.invalid:/x""#;
+        let redacted = redact_credentials(text);
+        assert!(!redacted.contains("SECRETPASS"), "{redacted}");
+        assert!(redacted.contains("host.invalid"), "{redacted}");
+    }
+
+    #[test]
+    fn test_redacts_key_value_prefixed_url() {
+        // Likewise for a `key=value` shaped token.
+        let text = "url=sftp:user:SECRETPASS@host.invalid:/x";
+        let redacted = redact_credentials(text);
+        assert!(!redacted.contains("SECRETPASS"), "{redacted}");
+        assert!(redacted.contains("host.invalid"), "{redacted}");
+    }
+
+    #[test]
+    fn test_redacted_text_hides_credentials() {
+        let text = RedactedText::new("sftp:user:SECRETPASS@host.invalid:/x");
+        assert!(!text.to_string().contains("SECRETPASS"), "{text}");
+        assert!(!format!("{text:?}").contains("SECRETPASS"), "{text:?}");
+        assert!(text.as_str().contains("host.invalid"), "{text}");
+    }
+
+    #[test]
+    fn test_redacted_text_of_plain_text_is_unchanged() {
+        let text = RedactedText::new("nothing to redact here");
+        assert_eq!(text.as_str(), "nothing to redact here");
     }
 
     #[test]

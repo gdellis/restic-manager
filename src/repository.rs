@@ -21,7 +21,7 @@ impl Repository {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
+            Err(ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into())
         }
     }
 
@@ -42,7 +42,7 @@ impl Repository {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
+            Err(ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into())
         }
     }
 
@@ -63,7 +63,7 @@ impl Repository {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
+            Err(ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into())
         }
     }
 }
