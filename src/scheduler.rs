@@ -396,12 +396,30 @@ mod tests {
     #[test]
     fn test_redact_error_removes_repo_credentials() {
         // The scheduler logs this text and sends it to the Telegram
-        // chat, so the password must not survive.
+        // chat, so the password must not survive. `CommandFailed` takes
+        // a `RedactedText`, so the credentials are already gone by the
+        // time the error exists.
         let err = AppError::Restic(crate::errors::ResticError::CommandFailed(
-            "Fatal: unable to open repository at \
-             sftp:user:SECRETPASS@host.invalid:/x: unable to start the sftp session"
-                .to_string(),
+            crate::redact::RedactedText::new(
+                "Fatal: unable to open repository at \
+                 sftp:user:SECRETPASS@host.invalid:/x: unable to start the sftp session",
+            ),
         ));
+        let text = redact_error(&err);
+        assert!(
+            !text.contains("SECRETPASS"),
+            "password must not reach the log or the Telegram chat: {text}"
+        );
+        assert!(text.contains("host.invalid"), "{text}");
+    }
+
+    #[test]
+    fn test_redact_error_scrubs_other_error_variants() {
+        // `redact_error` is the last line of defence for error variants
+        // that carry free-form text, so it must still strip credentials
+        // from a message it did not construct.
+        let err =
+            AppError::Other("restic failed for sftp:user:SECRETPASS@host.invalid:/x".to_string());
         let text = redact_error(&err);
         assert!(
             !text.contains("SECRETPASS"),

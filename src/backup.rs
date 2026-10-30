@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 /// stderr text ends up both in the logs and in the Telegram chat, so
 /// the credentials are stripped before the error is created.
 pub fn restic_command_failed(stderr: &str) -> AppError {
-    ResticError::CommandFailed(redact_credentials(stderr)).into()
+    ResticError::CommandFailed(crate::redact::RedactedText::new(stderr)).into()
 }
 
 /// Convert a path to a string suitable for use as a command argument.
