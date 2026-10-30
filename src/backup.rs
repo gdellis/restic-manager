@@ -3,6 +3,7 @@ use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
 use crate::redact::redact_credentials;
+use crate::restic_child::ResticChild;
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info, warn};
@@ -299,10 +300,12 @@ impl Backup {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(ResticError::from_io)?;
+        // Track the child so a shutdown can terminate it instead of
+        // leaving it running against the repository.
+        let child = ResticChild::spawn(&mut cmd).map_err(ResticError::from_io)?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
 
         // Drain stderr on a dedicated thread concurrently with the stdout
         // read loop below. If we read stdout to completion (or to the

@@ -7,9 +7,11 @@ pub mod exclude;
 pub mod notifications;
 pub mod redact;
 pub mod repository;
+pub mod restic_child;
 pub mod restore;
 pub mod scheduler;
 pub mod secrets;
+pub mod shutdown;
 pub mod snapshot;
 
 pub use cli::cli_run;

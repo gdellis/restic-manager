@@ -4,6 +4,7 @@ use crate::errors::AppError;
 use crate::repository::Repository;
 use crate::restore::Restore;
 use crate::scheduler::Scheduler;
+use crate::shutdown;
 use crate::snapshot::SnapshotManager;
 use clap::{Parser, Subcommand};
 
@@ -80,6 +81,14 @@ pub fn cli_run() -> Result<(), AppError> {
         .ok();
 
     let cli = Cli::parse();
+
+    // The daemon manages its own shutdown (drain, then force-exit); every
+    // other command runs `restic` as a child process and needs the watcher
+    // that terminates that child when a signal arrives.
+    if !matches!(&cli.command, Commands::Daemon) {
+        shutdown::watch_for_shutdown();
+    }
+
     let config = ResolvedConfig::load()?;
 
     match cli.command {
