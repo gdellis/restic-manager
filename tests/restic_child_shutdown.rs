@@ -21,6 +21,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+use restic_manager::restic_child::ResticChild;
 use std::time::{Duration, Instant};
 
 /// How long to wait for the shim to record its PID.
@@ -80,16 +82,29 @@ jobs:
     tmp
 }
 
-/// Whether a process with this PID still exists.
-fn process_exists(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+/// Whether a process with this PID is still running.
+///
+/// A zombie (state `Z`) is not running: the process has already died and
+/// the kernel has released its file descriptors, so it holds no repository
+/// lock. Only a live process keeps the repository locked, so that is what
+/// this checks.
+fn process_is_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The comm field is parenthesised and can contain spaces, so the
+    // state character is the one after the final ')'.
+    let Some((_, rest)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    !rest.starts_with('Z')
 }
 
-/// Waits for a process to disappear, returning whether it did.
-fn wait_for_process_to_exit(pid: u32, timeout: Duration) -> bool {
+/// Waits for a process to stop running, returning whether it did.
+fn wait_for_process_to_stop(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if !process_exists(pid) {
+        if !process_is_running(pid) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -184,7 +199,7 @@ fn one_shot_run_terminates_restic_child_on_sigterm() {
     // the manager has a live `restic` child.
     let shim_pid = wait_for_shim_pid(&pid_file, SHIM_START_TIMEOUT);
     assert!(
-        process_exists(shim_pid),
+        process_is_running(shim_pid),
         "the restic shim was not running when it recorded its PID"
     );
 
@@ -198,7 +213,7 @@ fn one_shot_run_terminates_restic_child_on_sigterm() {
     );
 
     assert!(
-        wait_for_process_to_exit(shim_pid, SHIM_EXIT_TIMEOUT),
+        wait_for_process_to_stop(shim_pid, SHIM_EXIT_TIMEOUT),
         "the restic child {shim_pid} outlived the manager and is still running"
     );
 
@@ -245,7 +260,7 @@ jobs:
     // killed. The PID file appears only once that child is live.
     let shim_pid = wait_for_shim_pid(&pid_file, SHIM_START_TIMEOUT);
     assert!(
-        process_exists(shim_pid),
+        process_is_running(shim_pid),
         "the restic shim was not running when it recorded its PID"
     );
 
@@ -263,9 +278,38 @@ jobs:
     assert_eq!(code, 130, "expected the force-exit code 130; got {code}");
 
     assert!(
-        wait_for_process_to_exit(shim_pid, SHIM_EXIT_TIMEOUT),
+        wait_for_process_to_stop(shim_pid, SHIM_EXIT_TIMEOUT),
         "the restic child {shim_pid} outlived the daemon and is still running"
     );
 
     std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// A terminated child must be reaped, not left as a zombie.
+///
+/// This process stays alive after the termination, so the child stays
+/// parented here: if the manager did not reap it, its /proc entry would
+/// linger as a zombie. The shutdown paths exit the process right after
+/// terminating the child, and `process::exit` skips destructors, so
+/// without an explicit reap the child is left for whoever reaps orphans.
+#[test]
+fn terminated_child_is_reaped() {
+    let mut cmd = Command::new("sleep");
+    cmd.arg("300");
+    let child = ResticChild::spawn(&mut cmd).unwrap();
+    let pid = child.pid();
+
+    // The child is alive until it is terminated.
+    assert!(
+        Path::new(&format!("/proc/{pid}")).exists(),
+        "the spawned child was not running"
+    );
+
+    child.terminate();
+
+    // A zombie would still have a /proc entry. A reaped child has none.
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the terminated child {pid} was left as a zombie instead of being reaped"
+    );
 }

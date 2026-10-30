@@ -36,11 +36,18 @@ struct TrackedChild {
 }
 
 impl TrackedChild {
-    /// Terminates the child, ignoring failures.
+    /// Terminates the child and reaps it, ignoring failures.
     ///
     /// A child that has already been reaped is left alone: its process id
     /// may have been reused by an unrelated process, and killing that would
     /// be worse than doing nothing.
+    ///
+    /// The reap matters for the shutdown paths: they exit the process
+    /// right after terminating the child, and `process::exit` skips
+    /// destructors, so without an explicit reap the child would be left
+    /// as a zombie. A zombie holds no lock - the lock is released when
+    /// the process dies - but it keeps its process id alive, which is
+    /// visible to anything inspecting /proc.
     fn terminate(&self) {
         let mut child = match self.child.lock() {
             Ok(guard) => guard,
@@ -49,7 +56,13 @@ impl TrackedChild {
         if self.reaped.load(Ordering::SeqCst) {
             return;
         }
-        let _ = child.kill();
+        if child.kill().is_ok() {
+            // The child was signalled, so this returns once it has died.
+            // `kill` failing means it had already exited, and `wait`
+            // still collects that status.
+            let _ = child.wait();
+            self.reaped.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -88,6 +101,11 @@ impl ResticChild {
     /// Takes the child's stderr pipe, if one was configured.
     pub fn take_stderr(&self) -> Option<std::process::ChildStderr> {
         self.lock().stderr.take()
+    }
+
+    /// The child's process id.
+    pub fn pid(&self) -> u32 {
+        self.lock().id()
     }
 
     /// Waits for the child to exit and returns its exit status.
