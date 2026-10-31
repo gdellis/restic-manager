@@ -39,6 +39,9 @@ AppData/Local/Cache
 }
 
 pub fn config_dir() -> Result<PathBuf, std::io::Error> {
+    if let Some(dir) = std::env::var_os("RESTIC_MANAGER_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     let dir = dirs::config_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Cannot find config directory")
     })?;

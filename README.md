@@ -71,7 +71,7 @@ cargo build --release
 
 ### Configuration
 
-Create `~/.config/restic-manager/config.yaml`:
+Create `~/.config/restic-manager/config.yaml` (or set `RESTIC_MANAGER_CONFIG_DIR` to use a custom directory):
 
 ```yaml
 repositories:
@@ -102,7 +102,7 @@ jobs:
         continue_on_error: false  # abort the backup if this hook fails (default)
 ```
 
-Create `~/.config/restic-manager/secrets.yaml` (gitignored):
+Create `~/.config/restic-manager/secrets.yaml` (gitignored, or under the directory specified by `RESTIC_MANAGER_CONFIG_DIR`):
 
 ```yaml
 restic-password: your-secret-password
@@ -114,6 +114,10 @@ telegram:
 This file holds plaintext repository passwords and your Telegram bot token, so restrict it to your
 own user (`chmod 600 ~/.config/restic-manager/secrets.yaml`). `restic-manager` warns at startup if
 it detects the file is readable or writable by group or others.
+
+`RESTIC_MANAGER_CONFIG_DIR` overrides the default `dirs::config_dir() + "/restic-manager"` location. It
+is useful for running multiple isolated configurations or for tests that cannot use the platform-
+specific config directory.
 
 ### Usage
 
