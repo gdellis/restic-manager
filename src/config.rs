@@ -61,27 +61,11 @@ impl Config {
         Ok(crate::exclude::config_dir()?.join("config.yaml"))
     }
 
-    /// Validates the config, returning the first problem found.
-    ///
-    /// [`Config::problems`] collects them all; this is the strict form the
-    /// one-shot CLI commands use.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        let all_errors = self.problems();
-        if all_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(join_errors(
-                "Configuration",
-                all_errors,
-            )))
-        }
-    }
-
     /// Collects every validation problem with this config instead of
     /// stopping at the first one.
     ///
     /// Each entry is a self-contained message, suitable for showing in a
-    /// UI as well as for the aggregated error [`Config::validate`] builds.
+    /// UI as well as for the aggregated error [`Config::load`] builds.
     pub fn problems(&self) -> Vec<String> {
         let mut all_errors = Vec::new();
 
@@ -558,7 +542,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -572,7 +556,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -590,7 +574,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -607,7 +591,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -626,7 +610,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -645,7 +629,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_ok());
+        assert!(result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -664,7 +648,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_ok());
+        assert!(result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -683,7 +667,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -724,7 +708,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repo path"), "{}", err);
         assert!(err.contains("empty password_key"), "{}", err);
     }
@@ -743,7 +727,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
     }
@@ -763,7 +747,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
         assert!(err.contains("invalid schedule"), "{}", err);
@@ -786,7 +770,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty backup path at index 1"), "{}", err);
         assert!(err.contains("empty backup path at index 2"), "{}", err);
         assert!(!err.contains("empty backup path at index 3"), "{}", err);
@@ -807,7 +791,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(
             !err.contains("non-existent repository"),
@@ -837,7 +821,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("Repository 'bad-repo-1'"), "{}", err);
         assert!(err.contains("Repository 'bad-repo-2'"), "{}", err);
         assert!(err.contains("Job 'bad-job-1'"), "{}", err);
@@ -865,7 +849,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
 
         let repo_a = err.find("Repository 'a-repo'").expect("a-repo error");
         let repo_z = err.find("Repository 'z-repo'").expect("z-repo error");

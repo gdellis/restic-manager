@@ -117,6 +117,8 @@ pub fn cli_run() -> Result<(), AppError> {
         // subscriber below is not installed for it: it draws into the
         // alternate screen, which shares the terminal with stderr, so log
         // lines written there would be spliced into the rendered widgets.
+        // This dispatch order is load-bearing: `try_init()` silently no-ops
+        // if a subscriber is already installed.
         Commands::Tui => crate::tui::run()?,
         command => {
             install_stderr_tracing();
