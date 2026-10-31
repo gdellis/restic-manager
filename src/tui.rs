@@ -237,14 +237,23 @@ fn daemon_running() -> bool {
 /// The global subscriber installed by `cli_run` writes to stderr, which the
 /// alternate screen shares with the rendered widgets, so the TUI replaces it
 /// with one that writes into the log view instead.
+///
+/// This must be called before any other global tracing subscriber is
+/// installed: `try_init()` silently no-ops if one already exists. `cli_run`
+/// guarantees this by dispatching `Commands::Tui` before installing the
+/// stderr subscriber.
 fn install_tracing(logs: LogSink) {
-    let writer = LogWriter { sink: logs };
-    tracing_subscriber::fmt()
+    let writer = LogWriter { sink: logs.clone() };
+    if let Err(e) = tracing_subscriber::fmt()
         .with_env_filter(crate::cli::build_env_filter())
         .with_writer(writer)
         .with_ansi(false)
         .try_init()
-        .ok();
+    {
+        logs.push(format!(
+            "warning: could not install TUI tracing subscriber; logs may go to stderr: {e}"
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +630,9 @@ fn load_lists(app: Arc<Mutex<App>>, config: &TuiConfig) {
 }
 
 /// Loads the details of one job from the in-memory config.
+///
+/// This runs synchronously on the event-loop thread because the data is
+/// already in memory; only `O(1)` hashmap lookups are performed.
 fn load_job_details(app: Arc<Mutex<App>>, config: &TuiConfig, job_name: &str) {
     let job = config.resolved.config.get_job(job_name).cloned();
     let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -637,6 +649,9 @@ fn load_job_details(app: Arc<Mutex<App>>, config: &TuiConfig, job_name: &str) {
 }
 
 /// Loads the details of one repository from the in-memory config.
+///
+/// This runs synchronously on the event-loop thread because the data is
+/// already in memory; only `O(1)` hashmap lookups are performed.
 fn load_repo_details(app: Arc<Mutex<App>>, config: &TuiConfig, repo_name: &str) {
     let repo = config.resolved.config.get_repository(repo_name).cloned();
     let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
