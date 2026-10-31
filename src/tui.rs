@@ -1,6 +1,6 @@
-use crate::config::{Job, Repository};
+use crate::config::{Job, Repository, ResolvedConfig};
 use crate::errors::AppError;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, SnapshotManager};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -21,6 +21,95 @@ const STATUS_MESSAGE_SECONDS: u64 = 5;
 const DAEMON_CHECK_SECONDS: u64 = 5;
 
 // ---------------------------------------------------------------------------
+// Log sink
+// ---------------------------------------------------------------------------
+
+/// Shared buffer of log lines, shown in the TUI's Logs view.
+///
+/// The TUI draws into the alternate screen, so anything written to the
+/// terminal's stderr lands in the middle of the rendered widgets. Tracing
+/// output is therefore routed here instead of to stderr.
+#[derive(Clone, Default)]
+struct LogSink {
+    state: Arc<Mutex<LogState>>,
+}
+
+#[derive(Default)]
+struct LogState {
+    lines: VecDeque<String>,
+    /// Partial trailing line, held until its newline arrives.
+    pending: String,
+}
+
+impl LogSink {
+    fn push(&self, line: String) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.lines.len() >= MAX_LOG_LINES {
+            state.lines.pop_front();
+        }
+        state.lines.push_back(line);
+    }
+
+    /// Appends raw bytes, splitting them into complete lines.
+    fn write(&self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending.push_str(&text);
+        while let Some(idx) = state.pending.find('\n') {
+            let line: String = state.pending.drain(..=idx).collect();
+            let line = line.trim_end().to_string();
+            if !line.is_empty() {
+                if state.lines.len() >= MAX_LOG_LINES {
+                    state.lines.pop_front();
+                }
+                state.lines.push_back(line);
+            }
+        }
+    }
+
+    /// The most recent lines, oldest first.
+    fn tail(&self, count: usize) -> Vec<String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let start = state.lines.len().saturating_sub(count);
+        state.lines.iter().skip(start).cloned().collect()
+    }
+}
+
+/// A `tracing` writer that appends to the TUI's log buffer.
+#[derive(Clone)]
+struct LogWriter {
+    sink: LogSink,
+}
+
+impl io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.sink.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+    type Writer = LogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
@@ -35,7 +124,9 @@ struct App {
     repo_list_index: usize,
     job_details: Option<Job>,
     repo_details: Option<Repository>,
-    logs: VecDeque<String>,
+    logs: LogSink,
+    /// Configuration problems found while loading, shown in the UI.
+    problems: Vec<String>,
     status_message: Option<(String, Instant)>,
     running_label: Arc<Mutex<Option<String>>>,
     child_pids: Arc<Mutex<Vec<u32>>>,
@@ -52,7 +143,7 @@ struct DataLoaded {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(logs: LogSink, problems: Vec<String>) -> Self {
         let mut sidebar_state = ListState::default();
         sidebar_state.select(Some(0));
         Self {
@@ -66,7 +157,8 @@ impl App {
             repo_list_index: 0,
             job_details: None,
             repo_details: None,
-            logs: VecDeque::with_capacity(MAX_LOG_LINES),
+            logs,
+            problems,
             status_message: None,
             running_label: Arc::new(Mutex::new(None)),
             child_pids: Arc::new(Mutex::new(Vec::new())),
@@ -82,10 +174,7 @@ impl App {
     }
 
     fn push_log(&mut self, line: String) {
-        if self.logs.len() >= MAX_LOG_LINES {
-            self.logs.pop_front();
-        }
-        self.logs.push_back(line);
+        self.logs.push(line);
     }
 
     fn set_status(&mut self, msg: String) {
@@ -143,13 +232,40 @@ fn daemon_running() -> bool {
     }
 }
 
+/// Routes `tracing` output into the TUI's log buffer.
+///
+/// The global subscriber installed by `cli_run` writes to stderr, which the
+/// alternate screen shares with the rendered widgets, so the TUI replaces it
+/// with one that writes into the log view instead.
+fn install_tracing(logs: LogSink) {
+    let writer = LogWriter { sink: logs };
+    tracing_subscriber::fmt()
+        .with_env_filter(crate::cli::build_env_filter())
+        .with_writer(writer)
+        .with_ansi(false)
+        .try_init()
+        .ok();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 pub fn run() -> Result<(), AppError> {
+    // Install the tracing subscriber before loading the config, so that
+    // warnings raised while loading (an insecure secrets file, say) land
+    // in the log view rather than being lost.
+    let logs = LogSink::default();
+    install_tracing(logs.clone());
+
+    // Load the configuration before the alternate screen is entered, so a
+    // config that cannot be read at all is reported as a normal error
+    // rather than corrupting the display. A config that loads but has
+    // problems is not fatal: the TUI starts and shows them.
+    let config = TuiConfig::load()?;
+
     let mut terminal = setup_terminal()?;
-    let result = event_loop(&mut terminal);
+    let result = event_loop(&mut terminal, config, logs);
     restore_terminal(&mut terminal).ok();
     result
 }
@@ -198,8 +314,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
 // Main event loop
 // ---------------------------------------------------------------------------
 
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), AppError> {
-    let app = Arc::new(Mutex::new(App::new()));
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    config: TuiConfig,
+    logs: LogSink,
+) -> Result<(), AppError> {
+    let app = Arc::new(Mutex::new(App::new(logs, config.problems.clone())));
 
     // Draw the first frame immediately so the user sees the UI before data loads.
     terminal
@@ -209,17 +329,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
         })
         .map_err(|e| AppError::Other(format!("draw: {e}")))?;
 
-    // Kick off initial data loads in the background so the UI stays responsive.
+    // Fill the job and repository lists from the config already in memory.
     // Note: config edits while the TUI is running are not picked up until a
     // restart. A reload key can be added in a future wave.
-    {
-        let a = Arc::clone(&app);
-        std::thread::spawn(move || load_jobs_async(a));
-    }
-    {
-        let a = Arc::clone(&app);
-        std::thread::spawn(move || load_repos_async(a));
-    }
+    load_lists(Arc::clone(&app), &config);
 
     loop {
         terminal
@@ -243,7 +356,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
             if let Event::Key(key) =
                 event::read().map_err(|e| AppError::Other(format!("event::read: {e}")))?
             {
-                if handle_key(key, Arc::clone(&app))? {
+                if handle_key(key, Arc::clone(&app), &config)? {
                     let child_pids = {
                         let a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         Arc::clone(&a.child_pids)
@@ -261,7 +374,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), A
 // ---------------------------------------------------------------------------
 
 /// Returns `Ok(true)` when the user requested quit.
-fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
+fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>, config: &TuiConfig) -> Result<bool, AppError> {
     {
         let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if a.show_help {
@@ -305,17 +418,15 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
                     a.selected_job = Some(a.jobs[a.job_list_index].clone());
                     a.job_details = None;
                     let name = a.selected_job.clone().unwrap();
-                    let app_arc = Arc::clone(&app);
                     drop(a);
-                    std::thread::spawn(move || load_job_details_async(app_arc, name));
+                    load_job_details(Arc::clone(&app), config, &name);
                 }
                 "Repositories" if !a.repos.is_empty() && a.repo_list_index < a.repos.len() => {
                     a.selected_repo = Some(a.repos[a.repo_list_index].clone());
                     a.repo_details = None;
                     let name = a.selected_repo.clone().unwrap();
-                    let app_arc = Arc::clone(&app);
                     drop(a);
-                    std::thread::spawn(move || load_repo_details_async(app_arc, name));
+                    load_repo_details(Arc::clone(&app), config, &name);
                 }
                 _ => {}
             }
@@ -358,7 +469,8 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>) -> Result<bool, AppError> {
                     a.snapshots.clear();
                 }
                 let a = Arc::clone(&app);
-                std::thread::spawn(move || load_snapshots_async(a, job));
+                let config = config.clone();
+                std::thread::spawn(move || load_snapshots_async(a, config, job));
             } else {
                 let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 a.set_status("Select a job first".to_string());
@@ -455,219 +567,108 @@ fn command_running(app: &App) -> bool {
 // Data loading (background threads)
 // ---------------------------------------------------------------------------
 
-fn load_jobs_async(app: Arc<Mutex<App>>) {
-    match App::current_exe() {
-        Ok(exe) => {
-            let output = Command::new(&exe)
-                .args(["jobs", "--format", "json"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    match serde_json::from_str::<Vec<String>>(stdout.trim()) {
-                        Ok(jobs) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.jobs = jobs;
-                            a.data_loaded.jobs = true;
-                        }
-                        Err(e) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.data_loaded.jobs = true;
-                            a.push_log(format!("error parsing jobs json: {e}"));
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.jobs = true;
-                    a.push_log(format!("error loading jobs: {stderr}"));
-                }
-                Err(e) => {
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.jobs = true;
-                    a.push_log(format!("error: {e}"));
-                }
+/// The configuration the TUI works from.
+///
+/// Loaded leniently: a repository whose secret is missing is reported as a
+/// problem rather than aborting the load, so one broken repository does not
+/// hide every other job from the dashboard.
+#[derive(Clone)]
+struct TuiConfig {
+    resolved: ResolvedConfig,
+    problems: Vec<String>,
+}
+
+impl TuiConfig {
+    fn load() -> Result<Self, AppError> {
+        let (resolved, problems) = ResolvedConfig::load_partial()?;
+        Ok(Self { resolved, problems })
+    }
+
+    /// Job names, from the loaded config.
+    fn job_names(&self) -> Vec<String> {
+        self.resolved
+            .config
+            .list_jobs()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Repository names, from the loaded config.
+    fn repo_names(&self) -> Vec<String> {
+        self.resolved
+            .config
+            .list_repositories()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+}
+
+/// Fills the job and repository lists from the in-memory config.
+///
+/// No subprocess is spawned and no JSON is parsed: the data is already in
+/// the same process.
+fn load_lists(app: Arc<Mutex<App>>, config: &TuiConfig) {
+    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    a.jobs = config.job_names();
+    a.repos = config.repo_names();
+    a.data_loaded.jobs = true;
+    a.data_loaded.repos = true;
+    for problem in &config.problems {
+        a.push_log(format!("config problem: {problem}"));
+    }
+}
+
+/// Loads the details of one job from the in-memory config.
+fn load_job_details(app: Arc<Mutex<App>>, config: &TuiConfig, job_name: &str) {
+    let job = config.resolved.config.get_job(job_name).cloned();
+    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match job {
+        Some(job) => {
+            if a.selected_job.as_deref() == Some(job_name) {
+                a.job_details = Some(job);
             }
         }
-        Err(e) => {
-            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            a.data_loaded.jobs = true;
-            a.push_log(format!("error: {e}"));
+        None => {
+            a.push_log(format!("job '{job_name}' not found in config"));
         }
     }
 }
 
-fn load_job_details_async(app: Arc<Mutex<App>>, job_name: String) {
-    match App::current_exe() {
-        Ok(exe) => {
-            let output = Command::new(&exe)
-                .args(["show", "job", &job_name, "--format", "json"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    match serde_json::from_str::<Job>(stdout.trim()) {
-                        Ok(job) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if a.selected_job.as_deref() == Some(&job_name) {
-                                a.job_details = Some(job);
-                            }
-                        }
-                        Err(e) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.push_log(format!(
-                                "error parsing job details json for {job_name}: {e}"
-                            ));
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.push_log(format!(
-                        "error loading job details for {job_name}: {stderr}"
-                    ));
-                }
-                Err(e) => {
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.push_log(format!("error loading job details for {job_name}: {e}"));
-                }
+/// Loads the details of one repository from the in-memory config.
+fn load_repo_details(app: Arc<Mutex<App>>, config: &TuiConfig, repo_name: &str) {
+    let repo = config.resolved.config.get_repository(repo_name).cloned();
+    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match repo {
+        Some(repo) => {
+            if a.selected_repo.as_deref() == Some(repo_name) {
+                a.repo_details = Some(repo);
             }
         }
-        Err(e) => {
-            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            a.push_log(format!("error loading job details for {job_name}: {e}"));
+        None => {
+            a.push_log(format!("repository '{repo_name}' not found in config"));
         }
     }
 }
 
-fn load_repos_async(app: Arc<Mutex<App>>) {
-    match App::current_exe() {
-        Ok(exe) => {
-            let output = Command::new(&exe)
-                .args(["repos", "--format", "json"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    match serde_json::from_str::<Vec<String>>(stdout.trim()) {
-                        Ok(repos) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.repos = repos;
-                            a.data_loaded.repos = true;
-                        }
-                        Err(e) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.data_loaded.repos = true;
-                            a.push_log(format!("error parsing repos json: {e}"));
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.repos = true;
-                    a.push_log(format!("error loading repos: {stderr}"));
-                }
-                Err(e) => {
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.repos = true;
-                    a.push_log(format!("error: {e}"));
-                }
-            }
-        }
-        Err(e) => {
-            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            a.data_loaded.repos = true;
-            a.push_log(format!("error: {e}"));
-        }
-    }
-}
-
-fn load_repo_details_async(app: Arc<Mutex<App>>, repo_name: String) {
-    match App::current_exe() {
-        Ok(exe) => {
-            let output = Command::new(&exe)
-                .args(["show", "repo", &repo_name, "--format", "json"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    match serde_json::from_str::<Repository>(stdout.trim()) {
-                        Ok(repo) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if a.selected_repo.as_deref() == Some(&repo_name) {
-                                a.repo_details = Some(repo);
-                            }
-                        }
-                        Err(e) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.push_log(format!(
-                                "error parsing repo details json for {repo_name}: {e}"
-                            ));
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.push_log(format!(
-                        "error loading repo details for {repo_name}: {stderr}"
-                    ));
-                }
-                Err(e) => {
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.push_log(format!("error loading repo details for {repo_name}: {e}"));
-                }
-            }
-        }
-        Err(e) => {
-            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            a.push_log(format!("error loading repo details for {repo_name}: {e}"));
-        }
-    }
-}
-
-fn load_snapshots_async(app: Arc<Mutex<App>>, job_name: String) {
-    match App::current_exe() {
-        Ok(exe) => {
-            let output = Command::new(&exe)
-                .args(["list", &job_name, "--format", "json"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    match serde_json::from_str::<Vec<Snapshot>>(stdout.trim()) {
-                        Ok(snapshots) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.snapshots = snapshots;
-                            a.data_loaded.snapshots = true;
-                        }
-                        Err(e) => {
-                            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                            a.data_loaded.snapshots = true;
-                            a.push_log(format!("error parsing snapshots json: {e}"));
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.snapshots = true;
-                    a.push_log(format!("error loading snapshots for {job_name}: {stderr}"));
-                }
-                Err(e) => {
-                    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    a.data_loaded.snapshots = true;
-                    a.push_log(format!("error: {e}"));
-                }
-            }
-        }
-        Err(e) => {
-            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Loads the snapshots for one job by calling `restic` directly.
+///
+/// This is the one data load that genuinely needs a subprocess: it talks to
+/// the repository. It runs on a background thread so the UI stays
+/// responsive, and it reports failures into the log view rather than
+/// writing to the terminal.
+fn load_snapshots_async(app: Arc<Mutex<App>>, config: TuiConfig, job_name: String) {
+    let result = SnapshotManager::list(&config.resolved, &job_name);
+    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match result {
+        Ok(list) => {
+            a.snapshots = list.snapshots;
             a.data_loaded.snapshots = true;
-            a.push_log(format!("error: {e}"));
+        }
+        Err(e) => {
+            a.data_loaded.snapshots = true;
+            a.push_log(format!("error loading snapshots for {job_name}: {e}"));
         }
     }
 }
@@ -924,6 +925,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn render_jobs(app: &App) -> Paragraph<'_> {
     let mut lines = Vec::new();
 
+    if !app.problems.is_empty() {
+        lines.push(Line::from(format!(
+            "Config problems ({}):",
+            app.problems.len()
+        )));
+        for problem in &app.problems {
+            lines.push(Line::from(format!("  {problem}")));
+        }
+        lines.push(Line::from(""));
+    }
+
     if app.data_loaded.jobs {
         if app.jobs.is_empty() {
             lines.push(Line::from("No jobs configured."));
@@ -1083,15 +1095,9 @@ fn render_repos(app: &App) -> Paragraph<'_> {
     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
 }
 
-fn render_logs(app: &App, height: usize) -> Paragraph<'_> {
+fn render_logs(app: &App, height: usize) -> Paragraph<'static> {
     let n = height.saturating_sub(2).max(1);
-    let start = app.logs.len().saturating_sub(n);
-    let lines: Vec<Line> = app
-        .logs
-        .iter()
-        .skip(start)
-        .map(|s| Line::from(s.as_str()))
-        .collect();
+    let lines: Vec<Line<'static>> = app.logs.tail(n).into_iter().map(Line::from).collect();
     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Logs"))
 }
 
@@ -1100,6 +1106,13 @@ fn build_status_text(app: &App) -> String {
         if at.elapsed() < Duration::from_secs(STATUS_MESSAGE_SECONDS) {
             return msg.clone();
         }
+    }
+
+    if !app.problems.is_empty() {
+        return format!(
+            "config: {} problem(s) - see Logs  ?:help q:quit",
+            app.problems.len()
+        );
     }
 
     if let Some(label) = app
