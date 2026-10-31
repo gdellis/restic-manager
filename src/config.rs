@@ -28,6 +28,22 @@ fn join_errors(prefix: &str, errors: Vec<String>) -> String {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        let (config, problems) = Self::load_with_problems()?;
+        if problems.is_empty() {
+            Ok(config)
+        } else {
+            Err(ConfigError::Invalid(join_errors("Configuration", problems)))
+        }
+    }
+
+    /// Loads the config file, returning any validation problems alongside
+    /// it rather than failing on the first one.
+    ///
+    /// The TUI uses this so a single broken entry does not hide the rest
+    /// of the configuration from the dashboard; the problems are shown in
+    /// the UI instead. [`Config::load`] keeps failing on them, which is
+    /// what the one-shot CLI commands want.
+    pub fn load_with_problems() -> Result<(Self, Vec<String>), ConfigError> {
         let path = Self::path()?;
         if !path.exists() {
             return Err(ConfigError::NotFound(format!(
@@ -37,16 +53,37 @@ impl Config {
         }
         let content = std::fs::read_to_string(&path)?;
         let config: Config = serde_yaml::from_str(&content)?;
-        config.validate()?;
-        Ok(config)
+        let problems = config.problems();
+        Ok((config, problems))
     }
 
     fn path() -> Result<PathBuf, ConfigError> {
         Ok(crate::exclude::config_dir()?.join("config.yaml"))
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
-        let mut all_errors: Vec<String> = Vec::new();
+    /// Validates the config, returning the first problem found.
+    ///
+    /// [`Config::problems`] collects them all; this is the strict form the
+    /// one-shot CLI commands use.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let all_errors = self.problems();
+        if all_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid(join_errors(
+                "Configuration",
+                all_errors,
+            )))
+        }
+    }
+
+    /// Collects every validation problem with this config instead of
+    /// stopping at the first one.
+    ///
+    /// Each entry is a self-contained message, suitable for showing in a
+    /// UI as well as for the aggregated error [`Config::validate`] builds.
+    pub fn problems(&self) -> Vec<String> {
+        let mut all_errors = Vec::new();
 
         for (repo_name, repo) in &self.repositories {
             if let Err(e) = repo.validate(repo_name) {
@@ -70,14 +107,7 @@ impl Config {
             }
         }
 
-        if all_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(join_errors(
-                "Configuration",
-                all_errors,
-            )))
-        }
+        all_errors
     }
 
     pub fn get_repository(&self, name: &str) -> Option<&Repository> {
@@ -294,6 +324,32 @@ impl ResolvedConfig {
         let resolved = Self { config, secrets };
         resolved.validate_secrets()?;
         Ok(resolved)
+    }
+
+    /// Loads the config and secrets without failing when an individual
+    /// repository's secret is missing.
+    ///
+    /// The TUI uses this: one broken repository must not hide every other
+    /// job from the dashboard. The returned problem list names the
+    /// repositories whose secrets could not be resolved, so the UI can show
+    /// them; jobs backed by a healthy repository still work.
+    pub fn load_partial() -> Result<(Self, Vec<String>), crate::errors::AppError> {
+        let (config, mut problems) =
+            Config::load_with_problems().map_err(crate::errors::AppError::Config)?;
+        let secrets = Secrets::load_optional()
+            .map_err(crate::errors::AppError::Secrets)?
+            .unwrap_or_default();
+
+        for (repo_name, repo) in &config.repositories {
+            if secrets.get(&repo.password_key).is_none() {
+                problems.push(format!(
+                    "Repository '{}' references missing secret key '{}'",
+                    repo_name, repo.password_key
+                ));
+            }
+        }
+
+        Ok((Self { config, secrets }, problems))
     }
 
     fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {

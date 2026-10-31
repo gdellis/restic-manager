@@ -105,12 +105,37 @@ pub enum Commands {
 }
 
 pub fn cli_run() -> Result<(), AppError> {
-    // Logs go to stderr so command output on stdout stays clean; under
-    // systemd both streams land in the journal. RUST_LOG overrides the
-    // default `info` level. ANSI colors only when stderr is a terminal,
-    // so journal/file output stays free of escape sequences. try_init
-    // rather than init so a second call (e.g. from a test harness) is a
-    // no-op instead of a panic.
+    let cli = Cli::parse();
+
+    match cli.command {
+        // The TUI loads the configuration itself, leniently, so that a
+        // single broken repository does not stop it from starting: it
+        // shows the problems in the UI instead. Every other command needs
+        // a fully resolved config, so it is loaded here.
+        //
+        // The TUI installs its own tracing subscriber, so the stderr
+        // subscriber below is not installed for it: it draws into the
+        // alternate screen, which shares the terminal with stderr, so log
+        // lines written there would be spliced into the rendered widgets.
+        Commands::Tui => crate::tui::run()?,
+        command => {
+            install_stderr_tracing();
+            let config = ResolvedConfig::load()?;
+            run_command(command, config)?
+        }
+    }
+
+    Ok(())
+}
+
+/// Sends log output to stderr so command output on stdout stays clean.
+///
+/// Under systemd both streams land in the journal. RUST_LOG overrides the
+/// default `info` level. ANSI colors only when stderr is a terminal, so
+/// journal/file output stays free of escape sequences. try_init rather than
+/// init so a second call (e.g. from a test harness) is a no-op instead of a
+/// panic.
+fn install_stderr_tracing() {
     let env_filter = build_env_filter();
 
     tracing_subscriber::fmt()
@@ -119,11 +144,11 @@ pub fn cli_run() -> Result<(), AppError> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()
         .ok();
+}
 
-    let cli = Cli::parse();
-    let config = ResolvedConfig::load()?;
-
-    match cli.command {
+/// Runs a command that needs a fully resolved configuration.
+fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError> {
+    match command {
         Commands::Run { name, dry_run } => {
             let result = Backup::run(&config, &name, dry_run)?;
             // This one-shot `run` invocation has no NotificationManager, so
@@ -234,9 +259,8 @@ pub fn cli_run() -> Result<(), AppError> {
             let path = crate::exclude::ensure_default_exclude_file()?;
             println!("Created default exclude file at: {}", path.display());
         }
-        Commands::Tui => {
-            crate::tui::run()?;
-        }
+        // Dispatched by `cli_run` before the config is resolved.
+        Commands::Tui => unreachable!("TUI is dispatched before the config is loaded"),
         Commands::Show { kind, name, format } => match kind {
             ShowKind::Job => {
                 let job = config
@@ -336,7 +360,7 @@ pub fn cli_run() -> Result<(), AppError> {
 ///
 /// Pure: no environment access, so callers (and tests) can drive any
 /// directive without touching the process-global `RUST_LOG`.
-fn filter_from_directive(directive: &str) -> tracing_subscriber::EnvFilter {
+pub(crate) fn filter_from_directive(directive: &str) -> tracing_subscriber::EnvFilter {
     if directive.is_empty() {
         return tracing_subscriber::EnvFilter::new("info");
     }
@@ -354,7 +378,7 @@ fn filter_from_directive(directive: &str) -> tracing_subscriber::EnvFilter {
 /// reads the env, then delegates. The split exists so the directive
 /// parser is unit-testable in isolation; the env read is a single
 /// line that only the production caller needs.
-fn build_env_filter() -> tracing_subscriber::EnvFilter {
+pub(crate) fn build_env_filter() -> tracing_subscriber::EnvFilter {
     let directive = std::env::var("RUST_LOG").unwrap_or_default();
     filter_from_directive(&directive)
 }
