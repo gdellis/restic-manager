@@ -73,8 +73,12 @@ scratch files. Keep durable QA evidence under `./.omo/evidence/` when needed.
   Don't `git add -f Cargo.lock`.
 - **Toolchain pinned to 1.97.0** in `rust-toolchain.toml` with `clippy` and `rustfmt`
   components. `dtolnay/rust-toolchain@stable` in CI picks this up automatically.
-- **`RESTIC_MANAGER_TEST_TICK_SECS` env var** in `src/scheduler.rs:165` is test-only and
-  unstable — exists only so integration tests don't have to wait for a real minute boundary.
+- **`RESTIC_MANAGER_CONFIG_DIR` env var** — override the configuration directory.
+  When set, `restic-manager` reads `config.yaml` and `secrets.yaml` from this directory instead of
+  from `dirs::config_dir() + "/restic-manager"`. Useful for isolated configurations and
+  cross-platform tests.
+- **`RESTIC_MANAGER_TEST_TICK_SECS` env var** in `src/scheduler.rs:165` is test-only and unstable —
+  exists only so integration tests don't have to wait for a real minute boundary.
 - **No `cargo new`-style sub-crates.** Single binary, single `Cargo.toml`, all modules live
   under `src/`.
 - **First-party actions in `.github/workflows/` are SHA-pinned.** Verify the new
