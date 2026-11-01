@@ -22,15 +22,22 @@ cited where the finding is already tracked.
 
 ## Decisions to confirm (recommendations included)
 
-| # | Decision | Recommendation |
-|---|----------|----------------|
-| D1 | How to scope legacy (untagged) snapshots once job tagging lands | Tag `restic-manager-job:<name>` going forward; filter `--tag` first, fall back to `--path <job paths>` so legacy snapshots stay visible |
-| D2 | Auto-retention: where it runs, and whether prune is toggleable | Run `apply_retention` after successful backup in `Backup::run` (skip dry-run); add `retention.prune: true` default since DESIGN calls prune optional |
-| D3 | Exit code for partial backups | `3`, mirroring restic |
-| D4 | `unlock --remove-all` (removes live locks) | Plain `restic unlock` by default; `--force` opts into `--remove-all` |
-| D5 | 6-field cron with non-zero seconds | Occurrence walking (`schedule.after()`) fixes the never-fires bug; also reject seconds != 0 at validation for honest minute-granularity semantics |
-| D6 | Restore `--target` guardrails | Refuse `/` and CWD always; non-empty existing dir requires new `--force` flag |
-| D7 | Config key for concurrency cap | `daemon: { max_concurrent_jobs: 2 }` (top-level block; additive, `deny_unknown_fields` safe) |
+- **D1 - Legacy (untagged) snapshot scoping after job tagging.** Recommendation: tag new snapshots
+  `restic-manager-job:<name>` going forward; filter `--tag` first, fall back to `--path <job paths>`
+  so legacy snapshots stay visible.
+- **D2 - Auto-retention: where it runs, and whether prune is toggleable.** Recommendation: run
+  `apply_retention` after successful backup in `Backup::run` (skip dry-run); add a
+  `retention.prune: true` default since DESIGN calls prune optional.
+- **D3 - Exit code for partial backups.** Recommendation: `3`, mirroring restic.
+- **D4 - `unlock --remove-all` (removes live locks).** Recommendation: plain `restic unlock` by
+  default; `--force` opts into `--remove-all`.
+- **D5 - 6-field cron with non-zero seconds.** Recommendation: occurrence walking
+  (`schedule.after()`) fixes the never-fires bug; also reject seconds != 0 at validation for honest
+  minute-granularity semantics.
+- **D6 - Restore `--target` guardrails.** Recommendation: refuse `/` and CWD always; non-empty
+  existing dir requires new `--force` flag.
+- **D7 - Config key for concurrency cap.** Recommendation: `daemon: { max_concurrent_jobs: 2 }`
+  (top-level block; additive, `deny_unknown_fields` safe).
 
 ## Milestone 0 — Test safety net (do first)
 
@@ -256,3 +263,64 @@ data-loss and secret-leak exposure:
 - README/DESIGN examples re-validated by the integration tests
   (`test_readme_quick_start_*` style).
 - PROGRESS.md entry summarizing the remediation.
+
+---
+
+## Coverage status: parallel GitHub PR train (2026-11-01)
+
+A parallel remediation train (PR #109's review of `feat/tui`: 36 findings, 19-PR plan in 7 waves) has fix
+PRs open on GitHub covering several items below. All claims verified against the PR diffs on 2026-11-01
+via `gh pr diff`. **Do not re-implement
+COVERED items** — duplicate work collides with the open PRs at merge time.
+
+| This plan | GitHub PR | Status | Verified evidence |
+| --- | --- | --- | --- |
+| PR-1.2 child termination + zombie reaping | #112 | COVERED | `src/restic_child.rs`, `src/shutdown.rs` SIGTERM path |
+| PR-1.2 watchdog deadline + bounded capture | none | NOT COVERED | #112: only 5s graceful-stop + test helpers |
+| PR-2.1 reject `keep_*: 0` (data loss) | none | NOT COVERED | #104 `validate` is `is_some()` only; zero passes |
+| PR-2.1 `retention.prune` toggle | none | NOT COVERED | no `Commands::Prune` changes in #104 |
+| PR-3.2 auto-retention after backup | #104 | PARTIAL | auto-apply is theirs; degraded-notify + tests stay ours |
+| PR-5.1 scheduler deadlock | #107 | COVERED | `try_send` + deferred-retry queue + deadlock tests |
+| PR-5.1 D7 concurrency cap | none | NOT COVERED | no `Semaphore`/`max_concurrent` anywhere in #107 |
+| PR-5.2 cron seconds-field rejection | #105 | PARTIAL | zero-incapable sets only; strict D5 + shared parser ours |
+| PR-5.2 catch-up + missed-window notice | none | NOT COVERED | no occurrence walking in #105 |
+| PR-6.1 credential redaction | #106 | COVERED (see audit) | `redact.rs`, `without_url`, hook/Telegram scrub |
+| PR-6.2 per-job rate limiter | none | NOT COVERED | — |
+| Summary counter parsing fix | #103 | COVERED (their item; not in this plan) | flat-vs-nested summary parse fix |
+
+PARTIAL remainders: PR-3.2 keeps degraded-notify-on-failure and both tests on our side. PR-5.2
+keeps strict D5 rejection and the shared `config::parse_schedule()` on our side (`*/5` and
+`0,15` seconds pass today).
+
+### Remaining train (implement in PR order)
+
+PR-1.1 (in flight, stacked on #112) · PR-1.2 remainder (watchdog + bounded capture) · PR-2.1 remainder
+(`keep_*: 0` rejection + prune toggle) · PR-2.2 · PR-3.1 · PR-4.1 · PR-4.2 · PR-4.3 · PR-5.1b (cap) ·
+PR-5.2b (catch-up) · PR-5.3 · PR-6.2 · PR-6.3 · PR-7.1 · PR-7.2 · PR-7.3
+
+### Merge gate
+
+`#104` must NOT merge until the `keep_*: 0` rejection (PR-2.1) lands — `keep_last: 0` passes its
+validation and `restic forget --keep-last 0` wipes the snapshot group.
+
+Audit item g, RESOLVED: #103's summary fields are all `#[serde(default)]` (no `deny_unknown_fields`),
+so a missing counter parses as 0, not an error. Our nested `tests/cli_contract.rs` stub keeps passing
+when #103 lands (its finder matches, nested keys are ignored, top-level `snapshot_id` survives) — but
+it stops exercising counter values. Migrate the stub to the flat documented shape in the same change
+that rebases onto #103.
+
+### Integration order (from the 2026-11-01 open-PR audit)
+
+Their open PRs, merged serially where they conflict: housekeeping #102/#111/#113/#108 -> #103 ->
+`#107` -> #106 -> #112 -> #104 -> #105. Known textual conflicts: #107 vs #112 in `src/scheduler.rs`;
+`#106` vs #112 at the same `src/restore.rs` and `src/repository.rs` statements; #104 vs #105 in
+`Job::validate` and the `src/config.rs` test anchor.
+
+Our train: swap PR-1.1's capture seam onto `restic_child::capture_output` at integration (after
+`#106` and #112) -> PR-1.2 (extend `src/restic_child.rs`) -> PR-2.1 remainder -> PR-2.2 -> PR-3.1
+(needs #103 first, else its counters parse as 0) -> PR-3.2 tests -> PR-4.x -> PR-5.x -> PR-6.x ->
+PR-7.x.
+
+Coordinate before duplicating (their plan has planned counterparts): PR-5.1b cap (their PR 18 M6),
+PR-5.3 (their PR 12/13), PR-6.2 (their PR 12 + 18 M2), PR-6.3 chat_id (their PR 9 M15),
+PR-7.1 (their PR 10), PR-7.3 (their PR 18).
