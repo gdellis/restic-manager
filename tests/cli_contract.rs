@@ -131,8 +131,8 @@ exit 3
 /// second run below where the file already existed and nothing was
 /// created - a known wording defect. PR-7.2 replaces that with honest
 /// wording and must update the second-run assertion deliberately.
-/// The non-clobbering half of the contract (an existing customized file
-/// keeps its content) is correct today and must NOT flip.
+/// The non-clobbering half of the contract lives in
+/// `init_exclude_never_clobbers_existing_file` below and must NOT flip.
 #[test]
 fn init_exclude_reports_created_even_when_file_already_exists() {
     let tmp = scratch_home("init-exclude");
@@ -158,9 +158,9 @@ fn init_exclude_reports_created_even_when_file_already_exists() {
         first_stdout
     );
 
-    // Customize the file, then re-run: the content must survive, and the
-    // message must still say "Created ..." even though nothing was
-    // created.
+    // Customize the file, then re-run: the message must still say
+    // "Created ..." even though nothing was created. That the content
+    // survives is asserted by init_exclude_never_clobbers_existing_file.
     let exclude_file = config_dir.join("excludes.txt");
     std::fs::write(&exclude_file, "# my custom excludes\n").unwrap();
 
@@ -178,6 +178,42 @@ fn init_exclude_reports_created_even_when_file_already_exists() {
         second_stdout
     );
 
+    // Cleanup only after the assertions so a failure leaves the scratch
+    // dir behind for debugging.
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// INVARIANT (never flips): `init-exclude` must not clobber an existing
+/// exclude file - a customized file keeps its content on re-run. This is
+/// correct today and must stay correct no matter how the wording contract
+/// in `init_exclude_reports_created_even_when_file_already_exists` flips
+/// in PR-7.2; it lives in its own test so that flip cannot edit it away.
+#[test]
+fn init_exclude_never_clobbers_existing_file() {
+    let tmp = scratch_home("init-exclude-no-clobber");
+    let config_dir = tmp.join("restic-manager");
+    write_config_and_secrets(&config_dir);
+    let bin_dir = tmp.join("bin");
+
+    let first = run_cli(&tmp, &bin_dir, &["init-exclude"]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "first init-exclude run failed; stdout:\n{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+
+    let exclude_file = config_dir.join("excludes.txt");
+    std::fs::write(&exclude_file, "# my custom excludes\n").unwrap();
+
+    let second = run_cli(&tmp, &bin_dir, &["init-exclude"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "second init-exclude run failed; stdout:\n{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+
     let content = std::fs::read_to_string(&exclude_file).unwrap();
     assert!(
         content.contains("# my custom excludes"),
@@ -185,7 +221,5 @@ fn init_exclude_reports_created_even_when_file_already_exists() {
         content
     );
 
-    // Cleanup only after the assertions so a failure leaves the scratch
-    // dir behind for debugging.
     std::fs::remove_dir_all(&tmp).ok();
 }

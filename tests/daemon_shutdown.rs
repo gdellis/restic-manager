@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 /// asserts log ORDERING (drain start -> job completion -> "Scheduler
 /// stopped"), not elapsed time, so the hook only has to be long enough
 /// that the job is still in flight when the test's SIGTERM lands - which
-/// it always is, since the signal is sent within milliseconds of the
-/// hook starting.
+/// it always is, since the test waits for the hook's start line before
+/// signaling, leaving ~HOOK_SECS of hook runtime on the clock.
 const HOOK_SECS: u64 = 5;
 /// How long the drain test waits for the daemon to exit after sending
 /// SIGTERM. Sized as `HOOK_SECS * 4` so the deadline tracks the hook:
@@ -282,10 +282,10 @@ jobs:
 #[test]
 fn daemon_drain_waits_for_in_flight_backup() {
     // Companion to the force-exit test: a single SIGTERM must make the
-    // drain actually WAIT for the in-flight job (here a 5s Wait hook)
-    // rather than detaching it, and then exit 0. Exit stays 0 even though
-    // the backup itself fails afterwards on the nonexistent repo - drain
-    // failures are deliberately log-only.
+    // drain actually WAIT for the in-flight job (here a `HOOK_SECS`-length
+    // Wait hook) rather than detaching it, and then exit 0. Exit stays 0
+    // even though the backup itself fails afterwards on the nonexistent
+    // repo - drain failures are deliberately log-only.
     let tmp = scratch_config(
         "drain-wait",
         &format!(
@@ -310,13 +310,13 @@ jobs:
 
     let mut daemon = Daemon::spawn(&tmp, &[("RESTIC_MANAGER_TEST_TICK_SECS", "1")]);
 
-    daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
-
-    // The job's Wait hook is still running at this point - the signal is
-    // sent within milliseconds of the hook starting - so the job is in
-    // flight when the drain begins. The assertions after exit check LOG
-    // ORDERING rather than elapsed time, so there is no "still alive"
-    // window for a slow runner to lose.
+    // "Waiting" is the Wait hook's start line (execute_hooks in
+    // src/backup.rs) and is proof the job is in flight: the signal below
+    // cannot land before the job starts, and ~HOOK_SECS of hook runtime
+    // still separates it from job completion. The assertions after exit
+    // check LOG ORDERING rather than elapsed time, so there is no "still
+    // alive" window for a slow runner to lose.
+    daemon.wait_for_log("Waiting", Duration::from_secs(30));
     daemon.sigterm();
 
     let status = daemon.wait_for_exit(EXIT_DEADLINE);
@@ -347,7 +347,7 @@ jobs:
         .expect("expected scheduler shutdown on stderr");
     assert!(
         draining < job_end && job_end < stopped,
-        "expected log order 'Draining in-flight jobs' -> 'Backup failed' -> 'Scheduler stopped', got indices {} -> {} -> {}; stderr:\n{}",
+        "expected log order 'Draining in-flight jobs' -> 'Backup failed' -> 'Scheduler stopped', got indices {} -> {} -> {}.\nIf 'Backup failed' comes before 'Draining in-flight jobs', the job finished before the SIGTERM was delivered (precondition lost on a heavily loaded runner); stderr:\n{}",
         draining, job_end, stopped, stderr
     );
     assert!(

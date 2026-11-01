@@ -76,7 +76,7 @@ jobs:
 /// values, so it passed even if validation were never invoked at all.)
 #[test]
 fn test_config_validate_job_refs_nonexistent_repo() {
-    let _guard = CONFIG_DIR_LOCK.lock().unwrap();
+    let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = scratch_xdg_home("job-refs");
     let config_dir = tmp.join("restic-manager");
 
@@ -378,7 +378,7 @@ telegram:
 
 #[test]
 fn test_resolved_config_load_fails_when_password_secret_missing() {
-    let _guard = CONFIG_DIR_LOCK.lock().unwrap();
+    let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = scratch_xdg_home("missing-secret");
     let config_dir = tmp.join("restic-manager");
 
