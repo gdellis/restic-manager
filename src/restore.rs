@@ -1,7 +1,5 @@
 use crate::config::ResolvedConfig;
-use crate::errors::{AppError, ResticError};
-use crate::restic_child;
-use std::process::Command;
+use crate::errors::AppError;
 use tracing::info;
 
 pub struct Restore;
@@ -49,15 +47,11 @@ impl Restore {
     }
 
     fn find_latest_snapshot(repo: &str, password: &str) -> Result<String, AppError> {
-        let mut cmd = Command::new("restic");
-        cmd.args(["snapshots", "--json", "--latest", "1", "--repo", repo])
-            .env("RESTIC_PASSWORD", password);
-        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        let output = crate::restic::run_restic(
+            &["snapshots", "--json", "--latest", "1", "--repo", repo],
+            password,
+            None,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Self::parse_latest_snapshot_id(&stdout)
@@ -98,14 +92,7 @@ impl Restore {
         // M0's pure build_restore_args() builder + #112's tracked-child
         // invocation, merged behavior-neutrally.
         let args = Self::build_restore_args(repo, target, snapshot_id);
-        let mut cmd = Command::new("restic");
-        cmd.args(&args).env("RESTIC_PASSWORD", password);
-        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        crate::restic::run_restic(&args, password, None)?;
 
         Ok(())
     }

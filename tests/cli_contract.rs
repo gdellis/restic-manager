@@ -223,3 +223,167 @@ fn init_exclude_never_clobbers_existing_file() {
 
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+// ---------------------------------------------------------------------------
+// PR-1.1: restic exit-code contract (shared runner mapping)
+// ---------------------------------------------------------------------------
+
+/// Restic exit 10 = repository does not exist / not initialized. It must
+/// surface as `ResticError::NotInitialized`, not a generic command failure.
+#[test]
+fn restic_exit_10_maps_to_not_initialized() {
+    let tmp = scratch_home("exit-10");
+    write_config_and_secrets(&tmp.join("restic-manager"));
+    write_stub_restic(&tmp.join("bin"), "#!/bin/sh\nexit 10\n");
+
+    let output = run_cli(&tmp, &tmp.join("bin"), &["run", "daily"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a failing restic must fail the CLI; got:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("Repository not initialized"),
+        "exit 10 must map to the NotInitialized error text; got:\n{}",
+        combined
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// Restic exit 11 = repository locked. Must map to `ResticError::Locked`.
+#[test]
+fn restic_exit_11_maps_to_locked() {
+    let tmp = scratch_home("exit-11");
+    write_config_and_secrets(&tmp.join("restic-manager"));
+    write_stub_restic(&tmp.join("bin"), "#!/bin/sh\nexit 11\n");
+
+    let output = run_cli(&tmp, &tmp.join("bin"), &["run", "daily"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a failing restic must fail the CLI; got:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("Repository locked"),
+        "exit 11 must map to the Locked error text; got:\n{}",
+        combined
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// Restic exit 12 = wrong password. Must map to `ResticError::InvalidPassword`.
+#[test]
+fn restic_exit_12_maps_to_invalid_password() {
+    let tmp = scratch_home("exit-12");
+    write_config_and_secrets(&tmp.join("restic-manager"));
+    write_stub_restic(&tmp.join("bin"), "#!/bin/sh\nexit 12\n");
+
+    let output = run_cli(&tmp, &tmp.join("bin"), &["run", "daily"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a failing restic must fail the CLI; got:\n{}",
+        combined
+    );
+    assert!(
+        combined.contains("Invalid password"),
+        "exit 12 must map to the InvalidPassword error text; got:\n{}",
+        combined
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// `forget` exit 3 = partial removal. The shared runner must hand the
+/// captured output back so the removed IDs parse and `prune` still runs,
+/// instead of aborting the retention run with a generic failure.
+#[test]
+fn forget_exit_three_still_runs_prune() {
+    let tmp = scratch_home("forget-partial");
+    let config_dir = tmp.join("restic-manager");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        r#"
+repositories:
+  test:
+    repo: /nonexistent/repo
+    password_key: test_pass
+jobs:
+  daily:
+    repository: test
+    paths:
+      - /nonexistent/path
+    retention:
+      keep_daily: 1
+      keep_weekly: 1
+      keep_monthly: 1
+      keep_yearly: 1
+      keep_hourly: 1
+      keep_last: 2
+"#,
+    )
+    .unwrap();
+    std::fs::write(config_dir.join("secrets.yaml"), "test_pass: dummy\n").unwrap();
+    write_stub_restic(
+        &tmp.join("bin"),
+        r#"#!/bin/sh
+echo "$@" >> "$(dirname "$0")/../argv.log"
+case "$1" in
+  forget)
+    echo '[{"remove":[{"id":"aaaa"},{"id":"bbbb"}]}]'
+    echo "unable to remove some snapshots" >&2
+    exit 3
+    ;;
+esac
+exit 0
+"#,
+    );
+
+    let output = run_cli(&tmp, &tmp.join("bin"), &["prune", "daily"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "forget exit 3 must not fail the retention run; stdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("removed 2 snapshot(s)"),
+        "the partial forget output must still be parsed; got:\n{}",
+        stdout
+    );
+    let argv_log = std::fs::read_to_string(tmp.join("argv.log")).unwrap_or_default();
+    assert!(
+        argv_log.contains("prune --repo"),
+        "prune must still run after a partial forget; argv log:\n{}",
+        argv_log
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}

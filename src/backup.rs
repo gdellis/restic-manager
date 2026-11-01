@@ -1,8 +1,6 @@
-use crate::cli_log::write_cli_output_log;
 use crate::config::{Hook, ResolvedConfig};
 use crate::errors::{AppError, ResticError};
 use crate::exclude;
-use crate::restic_child::ResticChild;
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info, warn};
@@ -12,47 +10,6 @@ use tracing::{debug, info, warn};
 /// Regression fix for #54: to_str().unwrap_or(".") would panic or return "." on non-UTF8 paths.
 pub fn path_to_arg(path: &Path) -> String {
     path.to_string_lossy().to_string()
-}
-
-fn format_progress(
-    files_done: u64,
-    total_files: u64,
-    bytes_done: u64,
-    total_bytes: u64,
-    errors: u64,
-) -> String {
-    let files_str = format!("{} files", files_done);
-    let bytes_str = format_bytes(bytes_done);
-    let total_str = format!("{} files {}", total_files, format_bytes(total_bytes));
-    let error_str = if errors > 0 {
-        format!("{} errors", errors)
-    } else {
-        String::new()
-    };
-
-    if error_str.is_empty() {
-        format!("{}, total {}", files_str, total_str)
-    } else {
-        format!(
-            "{}, total {} ({}), {}",
-            files_str, total_str, error_str, bytes_str
-        )
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-    if unit_idx == 0 {
-        format!("{} B", size as u64)
-    } else {
-        format!("{:.3} {}", size, UNITS[unit_idx])
-    }
 }
 
 /// Summary of a single backup run, parsed from restic's JSON progress stream.
@@ -158,17 +115,6 @@ impl Backup {
         Ok(result)
     }
 
-    fn join_stderr_thread(handle: std::thread::JoinHandle<String>) -> Option<String> {
-        match handle.join() {
-            Ok(text) if !text.is_empty() => Some(text),
-            Ok(_) => None,
-            Err(_) => {
-                warn!("stderr reader thread panicked; stderr output unavailable");
-                None
-            }
-        }
-    }
-
     fn execute_backup(
         repo: &str,
         password: &str,
@@ -204,140 +150,47 @@ impl Backup {
             debug!("DRY-RUN flag confirmed in command args");
         }
 
-        let mut cmd = Command::new("restic");
-        cmd.args(&args).env("RESTIC_PASSWORD", password);
+        let output = match crate::restic::run_restic(&args, password, log_file) {
+            Ok(output) => output,
+            // Exit 3: backup completed but some source files could not be
+            // read. Restic still creates a snapshot and writes its summary,
+            // so treat this as a partial success rather than a fatal
+            // failure - otherwise the already-parsed snapshot ID gets
+            // discarded and the caller can't tell "nothing was backed up"
+            // from "everything except a few unreadable files was backed up."
+            Err(ResticError::Partial { output, .. }) => output,
+            Err(e) => return Err(AppError::Restic(e)),
+        };
+        let partial = !output.status.success();
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        // Track the child so a shutdown can terminate it instead of
-        // leaving it running against the repository.
-        let child = ResticChild::spawn(&mut cmd).map_err(ResticError::from_io)?;
-
-        let stdout = child.take_stdout();
-        let stderr = child.take_stderr();
-
-        // Drain stderr on a dedicated thread concurrently with the stdout
-        // read loop below. If we read stdout to completion (or to the
-        // "summary" line) before touching stderr, restic can fill the
-        // ~64KB stderr pipe buffer and block on write() while we're
-        // blocked reading stdout -> deadlock.
-        let stderr_handle = stderr.map(|s| {
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let mut reader = std::io::BufReader::new(s);
-                let mut text = String::new();
-                if let Err(e) = reader.read_to_string(&mut text) {
-                    debug!("Failed to read restic stderr: {}", e);
-                }
-                text
-            })
-        });
-
-        let mut lines: Vec<String> = Vec::new();
-        // Tracks the highest error_count seen across "status" messages, so
-        // a partial backup's notification can report how many files were
-        // actually unreadable instead of a generic message.
-        let mut last_error_count: u64 = 0;
-
-        if let Some(stdout) = stdout {
-            use std::io::{BufRead, BufReader};
-            let mut stdout_reader = BufReader::new(stdout).lines();
-            for line in stdout_reader.by_ref().flatten() {
-                lines.push(line.clone());
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(msg_type) = json.get("message_type").and_then(|v| v.as_str()) {
-                        match msg_type {
-                            "status" => {
-                                let files_done =
-                                    json.get("files_done").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let total_files = json
-                                    .get("total_files")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let bytes_done =
-                                    json.get("bytes_done").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let total_bytes = json
-                                    .get("total_bytes")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let errors = json
-                                    .get("error_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                last_error_count = last_error_count.max(errors);
-                                if total_files > 0 {
-                                    let progress = format_progress(
-                                        files_done,
-                                        total_files,
-                                        bytes_done,
-                                        total_bytes,
-                                        errors,
-                                    );
-                                    eprint!("\r\x1B[2K{}", progress);
-                                }
-                            }
-                            "verbose_status" => {
-                                if let Some(item) = json.get("item").and_then(|v| v.as_str()) {
-                                    let action =
-                                        json.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                                    eprint!("\r\x1B[2K{}: {}", action, item);
-                                }
-                            }
-                            "summary" => {
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        let status = child.wait().map_err(ResticError::from_io)?;
-
-        let stderr_text = stderr_handle.and_then(Self::join_stderr_thread);
-
-        if let Some(text) = stderr_text.as_deref() {
-            warn!(stderr = text, "restic wrote to stderr");
-        }
-
-        // Write the CLI output log before handling the exit status, so a
-        // hard failure (wrong password, network error, unreachable repo)
-        // still gets logged - that's exactly the case log_cli_output is
-        // most useful for, and it would otherwise be silently skipped by
-        // the early return below.
-        if let Some(log_path) = log_file {
-            write_cli_output_log(log_path, &lines, stderr_text.as_deref());
-        }
-
-        // Exit code 3: backup completed but some source files could not be
-        // read. Restic still creates a snapshot and writes its summary, so
-        // treat this as a partial success rather than a fatal failure -
-        // otherwise the already-parsed snapshot ID gets discarded and the
-        // caller can't tell "nothing was backed up" from "everything except
-        // a few unreadable files was backed up."
-        let partial = status.code() == Some(3);
-        if !status.success() && !partial {
-            return Err(ResticError::CommandFailed(stderr_text.unwrap_or_default()).into());
-        }
-
-        let output = lines.join("\n");
-        let mut result = Self::parse_backup_output(&output)?;
+        let mut result = Self::parse_backup_output(&stdout)?;
         result.partial = partial;
-        result.errors_count = last_error_count;
+        result.errors_count = Self::max_status_error_count(&stdout);
 
         info!(
             snapshot = ?result.snapshot_id,
             files_new = result.files_new,
             files_changed = result.files_changed,
             partial = partial,
-            errors_count = last_error_count,
+            errors_count = result.errors_count,
             "Backup completed"
         );
 
         Ok(result)
+    }
+
+    /// Largest `error_count` reported by restic "status" messages.
+    /// `run_restic` returns the captured `Output` only (FIX_PLAN.md
+    /// PR-1.1), so the per-status error counts are re-scanned here.
+    fn max_status_error_count(stdout: &str) -> u64 {
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|json| json.get("message_type").and_then(|v| v.as_str()) == Some("status"))
+            .filter_map(|json| json.get("error_count").and_then(|v| v.as_u64()))
+            .max()
+            .unwrap_or(0)
     }
 
     fn parse_backup_output(output: &str) -> Result<BackupResult, AppError> {
@@ -742,27 +595,6 @@ mod tests {
 
         let result = Backup::run(&config, "test-job", false);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_join_stderr_thread_returns_text() {
-        let handle = std::thread::spawn(|| "warning: permission denied\n".to_string());
-        assert_eq!(
-            Backup::join_stderr_thread(handle),
-            Some("warning: permission denied\n".to_string())
-        );
-    }
-
-    #[test]
-    fn test_join_stderr_thread_empty_returns_none() {
-        let handle = std::thread::spawn(String::new);
-        assert_eq!(Backup::join_stderr_thread(handle), None);
-    }
-
-    #[test]
-    fn test_join_stderr_thread_panic_returns_none() {
-        let handle = std::thread::spawn(|| -> String { panic!("simulated reader panic") });
-        assert_eq!(Backup::join_stderr_thread(handle), None);
     }
 
     #[test]
