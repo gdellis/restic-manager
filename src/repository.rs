@@ -1,7 +1,5 @@
-use crate::cli_log::write_command_output;
 use crate::config::ResolvedConfig;
-use crate::errors::{AppError, ResticError};
-use std::process::Command;
+use crate::errors::AppError;
 
 pub struct Repository;
 
@@ -9,62 +7,35 @@ impl Repository {
     pub fn init(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
         let (repo, password) = config.resolve_repo(repo_name)?;
 
-        let output = Command::new("restic")
-            .args(["init", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        crate::restic::run_restic(&["init", "--repo", &repo.repo], password, None)?;
 
-        if output.status.success() {
-            println!("Repository '{}' initialized successfully", repo_name);
-            println!("  Path: {}", repo.repo);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
-        }
+        println!("Repository '{}' initialized successfully", repo_name);
+        println!("  Path: {}", repo.repo);
+        Ok(())
     }
 
     pub fn check(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
         let (repo, password) = config.resolve_repo(repo_name)?;
         let log_file = repo.log_cli_output.as_deref();
 
-        let output = Command::new("restic")
-            .args(["check", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        crate::restic::run_restic(&["check", "--repo", &repo.repo], password, log_file)?;
 
-        write_command_output(log_file, &output);
-
-        if output.status.success() {
-            println!("Repository '{}' check passed", repo_name);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
-        }
+        println!("Repository '{}' check passed", repo_name);
+        Ok(())
     }
 
     pub fn unlock(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
         let (repo, password) = config.resolve_repo(repo_name)?;
         let log_file = repo.log_cli_output.as_deref();
 
-        let output = Command::new("restic")
-            .args(["unlock", "--repo", &repo.repo, "--remove-all"])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        crate::restic::run_restic(
+            &["unlock", "--repo", &repo.repo, "--remove-all"],
+            password,
+            log_file,
+        )?;
 
-        write_command_output(log_file, &output);
-
-        if output.status.success() {
-            println!("Repository '{}' unlocked successfully", repo_name);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ResticError::CommandFailed(stderr.to_string()).into())
-        }
+        println!("Repository '{}' unlocked successfully", repo_name);
+        Ok(())
     }
 }
 
