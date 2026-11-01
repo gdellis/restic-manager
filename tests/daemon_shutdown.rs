@@ -16,24 +16,18 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Duration of the in-flight `Wait` pre-backup hook used by the drain
-/// test. The post-signal "still alive" assertion uses
-/// `HOOK_SECS - 1` so the bound stays in lockstep if the hook
-/// duration ever changes. Must be >= 2: a value of 1 would subtract
-/// to 0 (no margin against the gap between the log line and the hook
-/// actually starting), and a value of 0 would underflow
-/// `Duration::from_secs`.
+/// test, and the `seconds:` value fed into that test's config. The test
+/// asserts log ORDERING (drain start -> job completion -> "Scheduler
+/// stopped"), not elapsed time, so the hook only has to be long enough
+/// that the job is still in flight when the test's SIGTERM lands - which
+/// it always is, since the signal is sent within milliseconds of the
+/// hook starting.
 const HOOK_SECS: u64 = 5;
-const _: () = assert!(HOOK_SECS >= 2, "HOOK_SECS must be >= 2: see const doc");
-/// How long to keep asserting "the daemon is still alive" after the
-/// drain test sends SIGTERM, before allowing the exit assertion to
-/// run. One second less than the hook gives the test a margin for
-/// the gap between the log line and the hook actually starting.
-const STILL_ALIVE_AFTER_SIGNAL: Duration = Duration::from_secs(HOOK_SECS - 1);
-/// How long the drain test waits for the daemon to exit after
-/// `STILL_ALIVE_AFTER_SIGNAL` elapses. Sized as `HOOK_SECS * 4` so
-/// the deadline tracks the hook: bumping the hook to 60s gives the
-/// daemon 240s to drain, instead of timing out at a fixed 20s that
-/// would silently kill a long-running hook.
+/// How long the drain test waits for the daemon to exit after sending
+/// SIGTERM. Sized as `HOOK_SECS * 4` so the deadline tracks the hook:
+/// bumping the hook to 60s gives the daemon 240s to drain, instead of
+/// timing out at a fixed deadline that would silently kill a
+/// long-running hook.
 const EXIT_DEADLINE: Duration = Duration::from_secs(HOOK_SECS * 4);
 
 struct Daemon {
@@ -149,13 +143,24 @@ impl Daemon {
 }
 
 fn scratch_config(test_name: &str, config_yaml: &str, secrets_yaml: Option<&str>) -> PathBuf {
+    // Exclusive-create the scratch dir: `create_dir` (not `create_dir_all`)
+    // fails if anything - a stale dir from a crashed run, or a symlink
+    // planted at that path by another user - already exists there, instead
+    // of writing through it. The nanos suffix makes collisions with a
+    // previous run's leftovers practically impossible; the exclusive
+    // create makes them fail loudly if they ever happen.
     let tmp = std::env::temp_dir().join(format!(
-        "restic-manager-{}-{}",
+        "restic-manager-{}-{}-{}",
         test_name,
-        std::process::id()
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
+    std::fs::create_dir(&tmp).expect("scratch dir path should not already exist");
     let config_dir = tmp.join("restic-manager");
-    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir(&config_dir).unwrap();
     std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
     if let Some(secrets) = secrets_yaml {
         std::fs::write(config_dir.join("secrets.yaml"), secrets).unwrap();
@@ -283,7 +288,8 @@ fn daemon_drain_waits_for_in_flight_backup() {
     // failures are deliberately log-only.
     let tmp = scratch_config(
         "drain-wait",
-        r#"
+        &format!(
+            r#"
 repositories:
   test:
     repo: /nonexistent/repo
@@ -296,8 +302,9 @@ jobs:
     schedule: "* * * * *"
     pre_backup:
       - type: Wait
-        seconds: 5
-"#,
+        seconds: {HOOK_SECS}
+"#
+        ),
         Some("test_pass: dummy\n"),
     );
 
@@ -305,22 +312,12 @@ jobs:
 
     daemon.wait_for_log("Starting scheduled backup", Duration::from_secs(30));
 
+    // The job's Wait hook is still running at this point - the signal is
+    // sent within milliseconds of the hook starting - so the job is in
+    // flight when the drain begins. The assertions after exit check LOG
+    // ORDERING rather than elapsed time, so there is no "still alive"
+    // window for a slow runner to lose.
     daemon.sigterm();
-
-    let alive_check_started = Instant::now();
-    while alive_check_started.elapsed() < STILL_ALIVE_AFTER_SIGNAL {
-        if daemon.child.try_wait().unwrap().is_some() {
-            let stderr = daemon.stderr();
-            panic!(
-                "daemon exited after {:?}, before the in-flight {}s hook \
-                 could have finished - the drain did not wait; stderr:\n{}",
-                alive_check_started.elapsed(),
-                HOOK_SECS,
-                stderr
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let status = daemon.wait_for_exit(EXIT_DEADLINE);
     let stderr = daemon.stderr();
@@ -331,11 +328,35 @@ jobs:
         status,
         stderr
     );
+    // The job fails after its Wait hook (its repo doesn't exist), so its
+    // completion line is "Backup failed". A drain that waits for the
+    // in-flight job logs that line BETWEEN "Draining in-flight jobs" and
+    // "Scheduler stopped"; a drain that detached the job would log
+    // "Scheduler stopped" first (or lose the completion line entirely,
+    // since the process would exit before the job ran to the end). The
+    // ordering assertion is exactly the wait behavior under test, with no
+    // timing assumption baked in.
+    let draining = stderr
+        .find("Draining in-flight jobs")
+        .expect("expected the drain phase to start on stderr");
+    let job_end = stderr
+        .find("Backup failed")
+        .expect("expected the in-flight job to run to completion on stderr");
+    let stopped = stderr
+        .find("Scheduler stopped")
+        .expect("expected scheduler shutdown on stderr");
     assert!(
-        stderr.contains("Shutdown signal received") && stderr.contains("Scheduler stopped"),
-        "expected graceful drain logs on stderr; got:\n{}",
+        draining < job_end && job_end < stopped,
+        "expected log order 'Draining in-flight jobs' -> 'Backup failed' -> 'Scheduler stopped', got indices {} -> {} -> {}; stderr:\n{}",
+        draining, job_end, stopped, stderr
+    );
+    assert!(
+        stderr.contains("Shutdown signal received"),
+        "expected graceful shutdown log on stderr; got:\n{}",
         stderr
     );
 
+    // Cleanup only after the assertions so a failure leaves the scratch
+    // config behind for debugging.
     std::fs::remove_dir_all(&tmp).ok();
 }

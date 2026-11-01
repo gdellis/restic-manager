@@ -77,8 +77,13 @@ fn truncate_cli_log_entry(entry: &str) -> String {
 mod tests {
     use super::*;
 
-    fn unique_temp_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+    /// Exclusive-creates a unique scratch directory and returns it.
+    /// `create_dir` (not `create_dir_all`) fails if the path is already
+    /// taken - by a stale dir from a crashed run, or a symlink planted
+    /// at that path by another user - instead of writing through it.
+    /// Callers clean up with `remove_dir_all` after asserting.
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
             "restic-manager-test-cli-log-{}-{}-{}",
             label,
             std::process::id(),
@@ -86,7 +91,9 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ))
+        ));
+        std::fs::create_dir(&dir).expect("scratch dir path should not already exist");
+        dir
     }
 
     #[test]
@@ -112,7 +119,7 @@ mod tests {
 
     #[test]
     fn write_cli_output_log_appends_across_calls() {
-        let dir = unique_temp_path("append");
+        let dir = unique_temp_dir("append");
         let log_path = dir.join("nested").join("backup.log");
 
         write_cli_output_log(&log_path, &["first run line".to_string()], None);

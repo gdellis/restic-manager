@@ -1,10 +1,53 @@
 use restic_manager::config::{Config, Hook, NotificationConfig, ResolvedConfig, RetentionPolicy};
 use restic_manager::secrets::Secrets;
-use std::io::Write;
 use std::sync::Mutex;
 
 /// Serializes tests that mutate `XDG_CONFIG_HOME` so they don't race.
 static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+/// Exclusive-creates a unique scratch `$XDG_CONFIG_HOME` dir containing
+/// a `restic-manager/` subdirectory, for the env-mutating tests below.
+/// `create_dir` (not `create_dir_all`) fails if the path is already
+/// taken - by a stale dir from a crashed run, or a symlink planted at
+/// that path by another user - instead of writing through it. Callers
+/// clean up with `remove_dir_all` after asserting.
+fn scratch_xdg_home(label: &str) -> std::path::PathBuf {
+    let tmp = std::env::temp_dir().join(format!(
+        "restic-manager-test-{}-{}-{}",
+        label,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&tmp).expect("scratch dir path should not already exist");
+    std::fs::create_dir(tmp.join("restic-manager")).unwrap();
+    tmp
+}
+
+/// Saves `XDG_CONFIG_HOME` on creation and restores it on drop, so a
+/// panicking test can't leak a mutated environment into other tests.
+struct XdgEnvGuard {
+    old: Option<std::ffi::OsString>,
+}
+
+impl XdgEnvGuard {
+    fn set(dir: &std::path::Path) -> Self {
+        let old = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir);
+        Self { old }
+    }
+}
+
+impl Drop for XdgEnvGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+}
 
 #[test]
 fn test_config_deserialize() {
@@ -26,9 +69,18 @@ jobs:
     assert_eq!(config.jobs["daily"].repository, "backup1");
 }
 
+/// Regression guard: `Config::load()` must run its validation pass and
+/// reject a job whose `repository:` names a repository that isn't
+/// defined, with an error naming both the job and the missing repository.
+/// (The previous version of this test only asserted on the deserialized
+/// values, so it passed even if validation were never invoked at all.)
 #[test]
 fn test_config_validate_job_refs_nonexistent_repo() {
-    let yaml = r#"
+    let _guard = CONFIG_DIR_LOCK.lock().unwrap();
+    let tmp = scratch_xdg_home("job-refs");
+    let config_dir = tmp.join("restic-manager");
+
+    let config_yaml = r#"
 repositories:
   backup1:
     repo: /srv/backup1
@@ -39,9 +91,30 @@ jobs:
     paths:
       - /home
 "#;
-    let config: Config = serde_yaml::from_str(yaml).unwrap();
-    assert!(!config.repositories.contains_key("nonexistent"));
-    assert_eq!(config.jobs["daily"].repository, "nonexistent");
+    std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
+
+    let _xdg = XdgEnvGuard::set(&tmp);
+    let result = Config::load();
+    drop(_xdg);
+
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("Expected Config::load to reject a job referencing a missing repository"),
+    };
+    assert!(
+        err.contains("nonexistent"),
+        "error should name the missing repository, got: {}",
+        err
+    );
+    assert!(
+        err.contains("daily"),
+        "error should name the job with the bad reference, got: {}",
+        err
+    );
+
+    // Cleanup only after the assertions so a failure leaves the scratch
+    // config behind for debugging.
+    std::fs::remove_dir_all(&tmp).ok();
 }
 
 #[test]
@@ -306,12 +379,8 @@ telegram:
 #[test]
 fn test_resolved_config_load_fails_when_password_secret_missing() {
     let _guard = CONFIG_DIR_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!(
-        "restic-manager-test-missing-secret-{}",
-        std::process::id()
-    ));
+    let tmp = scratch_xdg_home("missing-secret");
     let config_dir = tmp.join("restic-manager");
-    std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_yaml = r#"
 repositories:
@@ -324,16 +393,11 @@ jobs:
     paths:
       - /home
 "#;
-    let mut config_file = std::fs::File::create(config_dir.join("config.yaml")).unwrap();
-    config_file.write_all(config_yaml.as_bytes()).unwrap();
+    std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
 
-    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
-    std::env::set_var("XDG_CONFIG_HOME", &tmp);
+    let _xdg = XdgEnvGuard::set(&tmp);
     let result = ResolvedConfig::load();
-    match old_xdg {
-        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-        None => std::env::remove_var("XDG_CONFIG_HOME"),
-    }
+    drop(_xdg);
 
     let err = match result {
         Err(e) => e.to_string(),
@@ -344,4 +408,8 @@ jobs:
         "error should name the missing secret key, got: {}",
         err
     );
+
+    // Cleanup only after the assertion so a failure leaves the scratch
+    // config behind for debugging.
+    std::fs::remove_dir_all(&tmp).ok();
 }
