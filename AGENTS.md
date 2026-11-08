@@ -11,7 +11,7 @@ anything beyond build/test.
   process systemd wraps. `src/main.rs` calls into `cli_run` (re-exported from
   `src/lib.rs:14`).
 - `src/lib.rs` — module list: `backup`, `cli`, `cli_log`, `config`, `errors`, `exclude`,
-  `notifications`, `repository`, `restore`, `scheduler`, `secrets`, `snapshot`. Read this first
+  `notifications`, `repository`, `restore`, `scheduler`, `secrets`, `snapshot`, `tui`. Read this first
   when tracing a command's flow.
 - `tests/daemon_shutdown.rs` — Linux-only (`#![cfg(target_os = "linux")]`) end-to-end tests
   of the SIGTERM/SIGINT drain contract. Uses `XDG_CONFIG_HOME` to point at scratch config.
@@ -19,7 +19,7 @@ anything beyond build/test.
 - `contrib/systemd/` — system + user unit files that ship with the repo. `ExecStart=` assumes
   the binary at `/usr/local/bin/restic-manager`; if `which restic-manager` says otherwise, fix
   the path before enabling or systemd will hit the start limit.
-- `DESIGN.md` — design notes (mermaid is out of date vs. the current 12-module layout; trust
+- `DESIGN.md` — design notes (mermaid is out of date vs. the current 13-module layout; trust
   the source).
 
 ## Commands (CI runs all four)
