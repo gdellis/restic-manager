@@ -1,6 +1,7 @@
 use crate::cli_log::write_command_output;
 use crate::config::ResolvedConfig;
 use crate::errors::{AppError, ResticError};
+use crate::restic_child;
 use std::process::Command;
 
 pub struct Repository;
@@ -9,11 +10,10 @@ impl Repository {
     pub fn init(config: &ResolvedConfig, repo_name: &str) -> Result<(), AppError> {
         let (repo, password) = config.resolve_repo(repo_name)?;
 
-        let output = Command::new("restic")
-            .args(["init", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["init", "--repo", &repo.repo])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         if output.status.success() {
             println!("Repository '{}' initialized successfully", repo_name);
@@ -29,11 +29,10 @@ impl Repository {
         let (repo, password) = config.resolve_repo(repo_name)?;
         let log_file = repo.log_cli_output.as_deref();
 
-        let output = Command::new("restic")
-            .args(["check", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["check", "--repo", &repo.repo])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         write_command_output(log_file, &output);
 
@@ -50,11 +49,10 @@ impl Repository {
         let (repo, password) = config.resolve_repo(repo_name)?;
         let log_file = repo.log_cli_output.as_deref();
 
-        let output = Command::new("restic")
-            .args(["unlock", "--repo", &repo.repo, "--remove-all"])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["unlock", "--repo", &repo.repo, "--remove-all"])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         write_command_output(log_file, &output);
 

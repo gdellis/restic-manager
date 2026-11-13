@@ -1,5 +1,6 @@
 use crate::config::ResolvedConfig;
 use crate::errors::{AppError, ResticError};
+use crate::restic_child;
 use std::process::Command;
 use tracing::info;
 
@@ -48,11 +49,10 @@ impl Restore {
     }
 
     fn find_latest_snapshot(repo: &str, password: &str) -> Result<String, AppError> {
-        let output = Command::new("restic")
-            .args(["snapshots", "--json", "--latest", "1", "--repo", repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["snapshots", "--json", "--latest", "1", "--repo", repo])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,11 +80,10 @@ impl Restore {
         snapshot_id: &str,
         target: &str,
     ) -> Result<(), AppError> {
-        let output = Command::new("restic")
-            .args(["restore", "--repo", repo, "--target", target, snapshot_id])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["restore", "--repo", repo, "--target", target, snapshot_id])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

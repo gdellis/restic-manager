@@ -1,6 +1,7 @@
 use crate::cli_log::write_command_output;
 use crate::config::{ResolvedConfig, RetentionPolicy};
 use crate::errors::{AppError, ResticError};
+use crate::restic_child;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::{info, warn};
@@ -40,11 +41,10 @@ impl SnapshotManager {
     pub fn list(config: &ResolvedConfig, job_name: &str) -> Result<SnapshotList, AppError> {
         let (_job, repo, password) = config.resolve_job(job_name)?;
 
-        let output = Command::new("restic")
-            .args(["snapshots", "--json", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["snapshots", "--json", "--repo", &repo.repo])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -125,11 +125,9 @@ impl SnapshotManager {
             "Applying retention policy"
         );
 
-        let output = Command::new("restic")
-            .args(&args)
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(&args).env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         write_command_output(repo.log_cli_output.as_deref(), &output);
 
@@ -196,11 +194,10 @@ impl SnapshotManager {
 
         info!(job = job_name, "Pruning repository");
 
-        let output = Command::new("restic")
-            .args(["prune", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
+        let mut cmd = Command::new("restic");
+        cmd.args(["prune", "--repo", &repo.repo])
+            .env("RESTIC_PASSWORD", password);
+        let output = restic_child::capture_output(&mut cmd).map_err(ResticError::from_io)?;
 
         write_command_output(repo.log_cli_output.as_deref(), &output);
 
