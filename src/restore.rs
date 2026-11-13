@@ -1,6 +1,5 @@
 use crate::config::ResolvedConfig;
-use crate::errors::{AppError, ResticError};
-use std::process::Command;
+use crate::errors::AppError;
 use tracing::info;
 
 pub struct Restore;
@@ -48,16 +47,11 @@ impl Restore {
     }
 
     fn find_latest_snapshot(repo: &str, password: &str) -> Result<String, AppError> {
-        let output = Command::new("restic")
-            .args(["snapshots", "--json", "--latest", "1", "--repo", repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        let output = crate::restic::run_restic(
+            &["snapshots", "--json", "--latest", "1", "--repo", repo],
+            password,
+            None,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Self::parse_latest_snapshot_id(&stdout)
@@ -74,22 +68,31 @@ impl Restore {
             .ok_or_else(|| AppError::Other("No snapshots found".into()))
     }
 
+    /// Pure builder for the `restic restore` argv, extracted so tests can
+    /// lock the exact shape `restore_snapshot_id` sends to restic. See the
+    /// `build_restore_args` tests below for the locked contract and the
+    /// planned PR that changes it.
+    fn build_restore_args(repo: &str, target: &str, snapshot_id: &str) -> Vec<String> {
+        vec![
+            "restore".to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--target".to_string(),
+            target.to_string(),
+            snapshot_id.to_string(),
+        ]
+    }
+
     fn restore_snapshot_id(
         repo: &str,
         password: &str,
         snapshot_id: &str,
         target: &str,
     ) -> Result<(), AppError> {
-        let output = Command::new("restic")
-            .args(["restore", "--repo", repo, "--target", target, snapshot_id])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        // M0's pure build_restore_args() builder + #112's tracked-child
+        // invocation, merged behavior-neutrally.
+        let args = Self::build_restore_args(repo, target, snapshot_id);
+        crate::restic::run_restic(&args, password, None)?;
 
         Ok(())
     }
@@ -178,5 +181,51 @@ mod tests {
         let json = r#"[{"id":"abc123def456","short_id":"abc123d"}]"#;
         let result = Restore::parse_latest_snapshot_id(json);
         assert_eq!(result.unwrap(), "abc123def456");
+    }
+
+    /// CONTRACT LOCK: the exact argv shape `restore_snapshot_id` sends to
+    /// restic today. Any change to the restore invocation must update this
+    /// test deliberately - that is the point. PR-4.2 hardens this shape
+    /// (inserting `--` before the positional so leading-dash values can't
+    /// be read as options) and flips this assertion on purpose.
+    #[test]
+    fn test_build_restore_args_matches_current_invocation() {
+        let args = Restore::build_restore_args("/srv/repo", "/restore/here", "abc123");
+        assert_eq!(
+            args,
+            vec![
+                "restore",
+                "--repo",
+                "/srv/repo",
+                "--target",
+                "/restore/here",
+                "abc123"
+            ]
+        );
+    }
+
+    /// CONTRACT LOCK (flips in PR-4.2): today a `target` or `snapshot_id`
+    /// beginning with `-` is forwarded to restic unguarded - there is no
+    /// `--` separator - so restic could read it as an option. This test
+    /// documents that current shape so the hardening in PR-4.2 is a
+    /// conscious change to this contract, not an accident.
+    #[test]
+    fn test_build_restore_args_forwards_leading_dash_values_unguarded() {
+        let args = Restore::build_restore_args("/srv/repo", "--delete", "-x");
+        assert_eq!(
+            args,
+            vec![
+                "restore",
+                "--repo",
+                "/srv/repo",
+                "--target",
+                "--delete",
+                "-x"
+            ]
+        );
+        assert!(
+            !args.contains(&"--".to_string()),
+            "no `--` guard exists yet; PR-4.2 adds one"
+        );
     }
 }

@@ -53,6 +53,16 @@ pub enum ResticError {
     #[error("Repository locked")]
     Locked,
 
+    /// restic exit 3: the command completed only partially (e.g. `forget`
+    /// removed only some snapshots, `backup` hit unreadable files). The
+    /// captured `Output` rides along so callers can parse the partial
+    /// results and continue instead of discarding them.
+    #[error("Restic partial success: {detail}")]
+    Partial {
+        detail: String,
+        output: std::process::Output,
+    },
+
     #[error("Snapshot not found: {0}")]
     SnapshotNotFound(String),
 }

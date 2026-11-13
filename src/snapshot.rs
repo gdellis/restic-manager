@@ -1,8 +1,6 @@
-use crate::cli_log::write_command_output;
 use crate::config::{ResolvedConfig, RetentionPolicy};
 use crate::errors::{AppError, ResticError};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tracing::{info, warn};
 
 /// A single restic snapshot, parsed from `restic snapshots --json`.
@@ -40,16 +38,11 @@ impl SnapshotManager {
     pub fn list(config: &ResolvedConfig, job_name: &str) -> Result<SnapshotList, AppError> {
         let (_job, repo, password) = config.resolve_job(job_name)?;
 
-        let output = Command::new("restic")
-            .args(["snapshots", "--json", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        let output = crate::restic::run_restic(
+            &["snapshots", "--json", "--repo", &repo.repo],
+            password,
+            None,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Self::parse_snapshots(stdout.trim())
@@ -125,18 +118,17 @@ impl SnapshotManager {
             "Applying retention policy"
         );
 
-        let output = Command::new("restic")
-            .args(&args)
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
-
-        write_command_output(repo.log_cli_output.as_deref(), &output);
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        let result = crate::restic::run_restic(&args, password, repo.log_cli_output.as_deref());
+        let output = match result {
+            Ok(output) => output,
+            Err(ResticError::Partial { output, .. }) => {
+                // restic exit 3 = partial removal. Keep going: the removed
+                // snapshot IDs still parse from the captured output and the
+                // `prune` that follows `forget` still runs.
+                output
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Self::parse_forget_output(stdout.trim())
@@ -196,18 +188,11 @@ impl SnapshotManager {
 
         info!(job = job_name, "Pruning repository");
 
-        let output = Command::new("restic")
-            .args(["prune", "--repo", &repo.repo])
-            .env("RESTIC_PASSWORD", password)
-            .output()
-            .map_err(ResticError::from_io)?;
-
-        write_command_output(repo.log_cli_output.as_deref(), &output);
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
-        }
+        crate::restic::run_restic(
+            &["prune", "--repo", &repo.repo],
+            password,
+            repo.log_cli_output.as_deref(),
+        )?;
 
         Ok(())
     }

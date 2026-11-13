@@ -46,6 +46,15 @@
 
 ---
 
+## Review Remediation Train (2026-11)
+
+Remediation of the 2026-10 code review; the ordered plan is [FIX_PLAN.md](FIX_PLAN.md).
+
+- [x] PR-0.1 - test safety net hardening (contract stubs, log-ordering, exclusive scratch dirs)
+- [x] PR-1.1 - shared `run_restic()` runner with typed exit codes (`src/restic.rs`)
+- [x] FIX_PLAN.md reconciled against the parallel GitHub PR train (coverage map + merge gate)
+- [ ] PR-1.2 through PR-7.3 remain - see the FIX_PLAN remaining-train list
+
 ## Current Focus: Open Issues Triage
 
 *Last updated: 2026-11-08*

@@ -377,6 +377,14 @@ in `cli.rs`, writing to stderr at `info` level by default (override with `RUST_L
 file rotation; under systemd the journal owns log persistence. A standalone `src/logging.rs` is
 **not yet implemented**.
 
+### src/restic.rs
+
+- `run_restic(args, password, log_path)` - the single shared restic invoker; every call site goes
+  through it (backup, restore, snapshot list/find, repository init/unlock/check)
+- Maps restic exit codes to typed errors: 10 -> `NotInitialized`, 11 -> `Locked`, 12 -> `InvalidPassword`
+- `forget` exit 3 (partial removal) parses the output and still runs prune
+- When stderr is empty, the error carries the exit status and a stdout tail instead
+
 ## Execution Flow
 
 1. **Startup**: Load config + secrets, validate, setup logging
