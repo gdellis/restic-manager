@@ -135,6 +135,39 @@ impl Backup {
             );
         }
 
+        // Retention is opt-in: it runs only when the job declares a
+        // `retention:` block. Without this, a job's keep rules were parsed
+        // and validated but never applied, so scheduled repositories grew
+        // without bound.
+        //
+        // A retention failure must never invalidate a good snapshot, so it
+        // is logged and the backup still reports success.
+        if !dry_run && job.retention.is_some() {
+            match crate::snapshot::SnapshotManager::apply_retention(config, job_name, false) {
+                Ok(removed) => {
+                    if removed.is_empty() {
+                        info!(
+                            job = job_name,
+                            "Retention applied, no snapshots needed removing"
+                        );
+                    } else {
+                        info!(
+                            job = job_name,
+                            count = removed.len(),
+                            "Retention applied, removed snapshots"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        job = job_name,
+                        error = %e,
+                        "Retention failed; the backup itself succeeded and is not affected"
+                    );
+                }
+            }
+        }
+
         if result.partial {
             warn!(
                 job = job_name,

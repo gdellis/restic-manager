@@ -162,6 +162,37 @@ impl Default for RetentionPolicy {
     }
 }
 
+impl RetentionPolicy {
+    /// True if at least one keep rule is set.
+    ///
+    /// A policy with no rules produces a `restic forget` invocation with no
+    /// `--keep-*` flags, which removes nothing - a silent no-op that looks
+    /// like it ran. `keep_last` defaults to `Some(3)` when the key is absent,
+    /// but an explicit `keep_last: null` clears it, so a policy can end up
+    /// with no rules at all.
+    pub fn has_rules(&self) -> bool {
+        self.keep_daily.is_some()
+            || self.keep_weekly.is_some()
+            || self.keep_monthly.is_some()
+            || self.keep_yearly.is_some()
+            || self.keep_hourly.is_some()
+            || self.keep_last.is_some()
+    }
+
+    /// Validate that the policy would actually do something.
+    pub fn validate(&self, job_name: &str) -> Result<(), ConfigError> {
+        if !self.has_rules() {
+            return Err(ConfigError::Invalid(format!(
+                "Job '{}' has a retention policy with no keep rules; it would remove nothing. \
+                 Set at least one of keep_last, keep_hourly, keep_daily, keep_weekly, \
+                 keep_monthly or keep_yearly.",
+                job_name
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotificationConfig {
@@ -241,6 +272,11 @@ impl Job {
         }
         if let Some(schedule) = &self.schedule {
             if let Err(e) = Self::validate_cron(schedule, name) {
+                errors.push(e.to_string());
+            }
+        }
+        if let Some(retention) = &self.retention {
+            if let Err(e) = retention.validate(name) {
                 errors.push(e.to_string());
             }
         }
@@ -690,6 +726,76 @@ jobs:
         let err = result.unwrap().validate().unwrap_err().to_string();
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
+    }
+
+    #[test]
+    fn test_retention_policy_with_no_keep_rules_is_rejected() {
+        // A policy whose every rule is explicitly null produces a `restic
+        // forget` with no --keep-* flags, which removes nothing. That is a
+        // silent no-op, so it must be reported at validation time.
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  stale:
+    repository: test
+    paths:
+    - /tmp/data
+    retention:
+      keep_daily: null
+      keep_weekly: null
+      keep_monthly: null
+      keep_yearly: null
+      keep_hourly: null
+      keep_last: null
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("no keep rules"), "{}", err);
+    }
+
+    #[test]
+    fn test_retention_policy_with_a_keep_rule_is_accepted() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  good:
+    repository: test
+    paths:
+    - /tmp/data
+    retention:
+      keep_daily: 7
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_retention_absent_keep_last_defaults_to_three() {
+        // keep_last has a serde default, so a policy that names only
+        // keep_daily still keeps the last 3 snapshots as well.
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  good:
+    repository: test
+    paths:
+    - /tmp/data
+    retention:
+      keep_daily: 7
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.get_job("good").unwrap().retention.as_ref().unwrap();
+        assert_eq!(policy.keep_last, Some(3));
+        assert!(policy.has_rules());
     }
 
     #[test]
