@@ -11,9 +11,11 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.15"
+crossterm = "0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", features = ["json"] }
+ratatui = "0.28"
 thiserror = "2"
 dirs = "6"
 indicatif = "0.17"

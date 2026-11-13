@@ -238,6 +238,7 @@ restic-manager check <job>      # Check repository integrity
 restic-manager unlock <job>     # Unlock stuck processes
 restic-manager daemon           # Run scheduler in foreground (systemd Type=simple friendly;
                                 # SIGTERM/Ctrl-C drain in-flight jobs before exit)
+restic-manager tui              # Open the interactive terminal dashboard (read-only, action-oriented)
 restic-manager jobs             # List all configured jobs
 restic-manager repos            # List all configured repositories
 restic-manager init <repo>      # Initialize repository
