@@ -255,8 +255,77 @@ impl Job {
         }
     }
 
+    /// The seconds field of a 6-field schedule, if the schedule has one.
+    ///
+    /// The cron crate's 6-field form is `sec min hour dom mon dow`, so the
+    /// first field is the seconds field. A 5-field schedule is left alone:
+    /// `normalize_cron` turns it into a 6-field expression with `0` seconds,
+    /// which is exactly what the scheduler can evaluate.
+    fn seconds_field(schedule: &str) -> Option<&str> {
+        let fields: Vec<&str> = schedule.split_whitespace().collect();
+        if fields.len() == 6 {
+            Some(fields[0])
+        } else {
+            None
+        }
+    }
+
+    /// Whether a cron seconds field can match second 0.
+    ///
+    /// The seconds field is a *set*, not a literal: `"00"`, `"*"`, `"*/5"`,
+    /// `"0-30"` and `"0,15"` all include second 0 and therefore do fire.
+    /// Only a field that genuinely excludes 0 makes the schedule unrunnable.
+    ///
+    /// Rather than re-implementing cron's field grammar, this asks the cron
+    /// crate itself: it builds a probe schedule that matches one known
+    /// instant and checks whether the seconds field matches at second 0.
+    fn seconds_field_can_match_zero(seconds: &str) -> bool {
+        use chrono::{Local, TimeZone, Timelike};
+
+        // "sec 0 0 1 1 *" matches Jan 1 at 00:00:00 in any year.
+        let probe = format!("{} 0 0 1 1 *", seconds);
+        let Ok(schedule) = cron::Schedule::from_str(&probe) else {
+            // An unparseable field is reported by the normal schedule
+            // validation, so treat it as "not our problem" here.
+            return true;
+        };
+
+        let Some(instant) = Local
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .and_then(|dt| dt.with_second(0))
+        else {
+            return true;
+        };
+
+        schedule.includes(instant)
+    }
+
     fn validate_cron(schedule: &str, job_name: &str) -> Result<(), ConfigError> {
         let normalized = normalize_cron(schedule);
+
+        // The scheduler evaluates `Local::now().with_second(0)`, so it only
+        // ever tests a schedule against second 0 of the minute. A 6-field
+        // schedule whose seconds field cannot match 0 therefore parses fine
+        // but can never fire, and would do so silently.
+        //
+        // The cron crate's 6-field form is `sec min hour dom mon dow`, so the
+        // FIRST field is the seconds field.
+        //
+        // The seconds field is matched as a set, not compared literally:
+        // "00", "*", "*/5", "0-30" and "0,15" all include second 0 and do
+        // fire, so only a field that genuinely excludes 0 is rejected.
+        if let Some(seconds) = Self::seconds_field(schedule) {
+            if !Self::seconds_field_can_match_zero(seconds) {
+                return Err(ConfigError::Invalid(format!(
+                    "Job '{}' has an invalid schedule '{}': a 6-field schedule with a \
+                     non-zero seconds field ({}) can never fire, because the scheduler \
+                     only evaluates schedules at second 0. Use a 5-field schedule, or \
+                     set the seconds field to 0.",
+                    job_name, schedule, seconds
+                )));
+            }
+        }
         cron::Schedule::from_str(&normalized).map_err(|e| {
             ConfigError::Invalid(format!(
                 "Job '{}' has an invalid schedule '{}': {}",
@@ -690,6 +759,59 @@ jobs:
         let err = result.unwrap().validate().unwrap_err().to_string();
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
+    }
+
+    #[test]
+    fn test_six_field_schedule_with_nonzero_seconds_is_rejected() {
+        // The scheduler evaluates schedules at second 0 only, so a seconds
+        // field that cannot match 0 makes the job silently never run.
+        let err = Job::validate_cron("30 0 2 * * *", "j").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("seconds"), "{}", msg);
+    }
+
+    #[test]
+    fn test_six_field_schedule_with_zero_seconds_is_accepted() {
+        assert!(Job::validate_cron("0 0 2 * * *", "j").is_ok());
+    }
+
+    #[test]
+    fn test_five_field_schedule_is_unaffected() {
+        assert!(Job::validate_cron("0 2 * * *", "j").is_ok());
+        assert!(Job::validate_cron("*/5 * * * *", "j").is_ok());
+    }
+
+    #[test]
+    fn test_seconds_fields_that_include_zero_are_accepted() {
+        // These are sets, not literals: each one matches second 0, so each
+        // one fires and none of them may be rejected.
+        for seconds in ["0", "00", "*", "*/5", "0-30", "0,15", "*/1", "0-59/7"] {
+            let expr = format!("{} 0 2 * * *", seconds);
+            assert!(
+                Job::validate_cron(&expr, "j").is_ok(),
+                "seconds field {:?} should be accepted",
+                seconds
+            );
+        }
+    }
+
+    #[test]
+    fn test_seconds_fields_that_exclude_zero_are_rejected() {
+        for seconds in ["30", "1-30/5", "15,45", "1-59", "59"] {
+            let expr = format!("{} 0 2 * * *", seconds);
+            assert!(
+                Job::validate_cron(&expr, "j").is_err(),
+                "seconds field {:?} should be rejected",
+                seconds
+            );
+        }
+    }
+
+    #[test]
+    fn test_seven_field_schedule_is_unaffected() {
+        // The integration suite uses a 7-field Quartz expression; it has a
+        // seconds field of 0 and must keep working.
+        assert!(Job::validate_cron("0 0 0 1 1 ? 2099", "j").is_ok());
     }
 
     #[test]
