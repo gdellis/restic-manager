@@ -48,7 +48,9 @@ impl SnapshotManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
+            return Err(
+                ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into(),
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -135,7 +137,9 @@ impl SnapshotManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
+            return Err(
+                ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into(),
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -206,7 +210,9 @@ impl SnapshotManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ResticError::CommandFailed(stderr.to_string()).into());
+            return Err(
+                ResticError::CommandFailed(crate::redact::RedactedText::new(&stderr)).into(),
+            );
         }
 
         Ok(())

@@ -1,3 +1,4 @@
+use crate::redact::RedactedText;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -35,8 +36,13 @@ pub enum SecretsError {
 
 #[derive(Error, Debug)]
 pub enum ResticError {
+    /// Restic echoes the repository URL verbatim in its stderr, and that
+    /// URL can carry credentials (`sftp:user:password@host:/path`). The
+    /// payload is a [`RedactedText`], so the credentials are stripped
+    /// before the error exists - every caller is covered, including the
+    /// ones that only wanted a nicer message.
     #[error("Restic command failed: {0}")]
-    CommandFailed(String),
+    CommandFailed(RedactedText),
 
     #[error("Restic not found in PATH")]
     NotFound,

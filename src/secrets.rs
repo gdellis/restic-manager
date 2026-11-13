@@ -35,6 +35,7 @@ impl Secrets {
         Self::warn_if_insecure_permissions(&path);
         let content = std::fs::read_to_string(&path)?;
         let secrets: Secrets = serde_yaml::from_str(&content)?;
+        secrets.warn_if_telegram_incomplete();
         Ok(secrets)
     }
 
@@ -46,6 +47,7 @@ impl Secrets {
         Self::warn_if_insecure_permissions(&path);
         let content = std::fs::read_to_string(&path)?;
         let secrets: Secrets = serde_yaml::from_str(&content)?;
+        secrets.warn_if_telegram_incomplete();
         Ok(Some(secrets))
     }
 
@@ -119,6 +121,43 @@ impl Secrets {
     pub fn telegram_config(&self) -> Option<&TelegramConfig> {
         self.telegram.as_ref()
     }
+
+    /// Returns a warning message if a `telegram` block is present but
+    /// carries no bot token.
+    ///
+    /// `TelegramConfig` can't use `deny_unknown_fields`: serde doesn't
+    /// allow combining it with `flatten`, which `Secrets` needs for the
+    /// arbitrary user-defined secret keys. The practical consequence is
+    /// that a misspelled key (`bot_tokenn` instead of `bot_token`) is
+    /// silently dropped: the config validates, the daemon starts, and
+    /// alerting is quietly disabled with no indication why. Surfacing a
+    /// warning when a telegram block exists without a token closes that
+    /// gap.
+    pub fn telegram_incomplete_warning(&self) -> Option<String> {
+        let telegram = self.telegram.as_ref()?;
+        if telegram
+            .bot_token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty())
+        {
+            return None;
+        }
+        Some(
+            "secrets file contains a 'telegram' block without a usable 'bot_token'; \
+             Telegram notifications are disabled (check for a misspelled key such as \
+             'bot_tokenn')"
+                .to_string(),
+        )
+    }
+
+    /// Warn (without failing) if the secrets file has a telegram block
+    /// but no bot token.
+    fn warn_if_telegram_incomplete(&self) {
+        if let Some(message) = self.telegram_incomplete_warning() {
+            warn!("{}", message);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +165,50 @@ impl Secrets {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn test_misspelled_bot_token_is_reported_as_incomplete() {
+        // Regression test: `TelegramConfig` can't use deny_unknown_fields
+        // (serde forbids combining it with flatten, which `Secrets`
+        // needs), so a misspelled key is silently dropped. Without a
+        // warning the user gets a config that validates, a daemon that
+        // runs, and no alerts at all.
+        let yaml = "telegram:\n  bot_tokenn: \"123456:ABC\"\n  chat_id: \"42\"\n";
+        let secrets: Secrets = serde_yaml::from_str(yaml).expect("secrets must parse");
+
+        // Precondition: the typo is silently dropped by the parser.
+        assert!(secrets.telegram.is_some());
+        assert!(secrets.telegram_config().unwrap().bot_token.is_none());
+
+        let warning = secrets
+            .telegram_incomplete_warning()
+            .expect("a telegram block without a bot token must be reported");
+        assert!(
+            warning.contains("bot_token"),
+            "the warning should name the missing field: {warning}"
+        );
+    }
+
+    #[test]
+    fn test_complete_telegram_block_is_not_reported() {
+        let yaml = "telegram:\n  bot_token: \"123456:ABC\"\n  chat_id: \"42\"\n";
+        let secrets: Secrets = serde_yaml::from_str(yaml).expect("secrets must parse");
+        assert!(secrets.telegram_incomplete_warning().is_none());
+    }
+
+    #[test]
+    fn test_no_telegram_block_is_not_reported() {
+        let yaml = "some-secret: value\n";
+        let secrets: Secrets = serde_yaml::from_str(yaml).expect("secrets must parse");
+        assert!(secrets.telegram_incomplete_warning().is_none());
+    }
+
+    #[test]
+    fn test_empty_bot_token_is_reported_as_incomplete() {
+        let yaml = "telegram:\n  bot_token: \"\"\n  chat_id: \"42\"\n";
+        let secrets: Secrets = serde_yaml::from_str(yaml).expect("secrets must parse");
+        assert!(secrets.telegram_incomplete_warning().is_some());
+    }
 
     #[test]
     fn test_is_insecure_permissions_0600_is_secure() {
