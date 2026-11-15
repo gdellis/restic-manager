@@ -746,8 +746,16 @@ fn apply_reloaded_config(a: &mut App, config: &TuiConfig) {
     a.repos = config.repo_names();
     a.data_loaded.jobs = true;
     a.data_loaded.repos = true;
-    a.job_list_index = a.job_list_index.min(a.jobs.len().saturating_sub(1));
-    a.repo_list_index = a.repo_list_index.min(a.repos.len().saturating_sub(1));
+    a.job_list_index = if a.jobs.is_empty() {
+        0
+    } else {
+        a.job_list_index.min(a.jobs.len() - 1)
+    };
+    a.repo_list_index = if a.repos.is_empty() {
+        0
+    } else {
+        a.repo_list_index.min(a.repos.len() - 1)
+    };
 
     a.problems = config.problems.clone();
     for problem in &config.problems {
@@ -764,6 +772,7 @@ fn apply_reloaded_config(a: &mut App, config: &TuiConfig) {
             a.selected_job = None;
             a.job_details = None;
             a.snapshots.clear();
+            a.data_loaded.snapshots = false;
         }
     }
     if let Some(name) = a.selected_repo.clone() {
