@@ -18,11 +18,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
+/// Maximum number of backups that may run concurrently.
+///
+/// Jobs that come due while this many are already running are queued (in
+/// dispatch order) rather than each spawning another `spawn_blocking`
+/// restic run, which would saturate the blocking thread pool when many
+/// jobs share a schedule. A queued job is still marked in-flight so a
+/// re-trigger coalesces with it. On shutdown the queue is abandoned:
+/// only backups that already hold a slot are drained, so the drain time
+/// stays bounded by the running jobs, and the skipped jobs simply run at
+/// their next scheduled slot.
+pub const MAX_CONCURRENT_BACKUPS: usize = 4;
+
 pub struct Scheduler {
-    config: ResolvedConfig,
+    config: Arc<ResolvedConfig>,
     jobs: HashMap<String, JobEntry>,
 }
 
@@ -57,11 +70,13 @@ impl Drop for InFlightGuard {
 /// backups, which a unit test must not do. The runner receives the
 /// shared in-flight set and is responsible for holding the job's
 /// in-flight guard for the duration of the job, so the job stays marked
-/// as running until it finishes (or the future is dropped).
+/// as running until it finishes (or the future is dropped). If the
+/// dispatch wrapper skips the job before polling this future (shutdown
+/// while queued for a slot), it clears the in-flight entry itself.
 trait JobRunner {
     fn run(
         &self,
-        config: ResolvedConfig,
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
@@ -76,7 +91,7 @@ struct BackupRunner {
 impl JobRunner for BackupRunner {
     fn run(
         &self,
-        config: ResolvedConfig,
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
@@ -89,7 +104,8 @@ impl JobRunner for BackupRunner {
 }
 
 impl Scheduler {
-    pub fn new(config: ResolvedConfig) -> Result<Self, AppError> {
+    pub fn new(config: impl Into<Arc<ResolvedConfig>>) -> Result<Self, AppError> {
+        let config: Arc<ResolvedConfig> = config.into();
         let mut jobs = HashMap::new();
 
         for (job_name, job) in config.config.jobs.iter() {
@@ -313,6 +329,10 @@ impl Scheduler {
         let mut last_triggered: HashMap<String, DateTime<Local>> = HashMap::new();
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let mut tasks = tokio::task::JoinSet::new();
+        // Bounds how many dispatched jobs actually run at once; the rest
+        // park on it in FIFO order. Closed on shutdown so parked jobs bail
+        // out instead of starting a fresh restic run during the drain.
+        let concurrency = Arc::new(Semaphore::new(MAX_CONCURRENT_BACKUPS));
 
         // Created once outside the loop so the SIGTERM stream isn't
         // re-registered on every select iteration, and before the
@@ -398,19 +418,53 @@ impl Scheduler {
                     {
                         let mut running = in_flight.lock().unwrap_or_else(|p| p.into_inner());
                         if !Self::try_start(&mut running, &name) {
-                            warn!(job = %name, "Skipping trigger: job is already running");
+                            warn!(job = %name, "Skipping trigger: job is already running or queued");
                             continue;
                         }
                     }
 
-                    let config = self.config.clone();
+                    let config = Arc::clone(&self.config);
                     let job = config.config.get_job(&name).cloned();
+                    let run = runner.run(config, job, name.clone(), Arc::clone(&in_flight));
                     let in_flight = Arc::clone(&in_flight);
-                    tasks.spawn(runner.run(config, job, name, in_flight));
+                    let concurrency = Arc::clone(&concurrency);
+                    tasks.spawn(async move {
+                        // Try without waiting first so the "waiting" log is
+                        // emitted exactly when the job actually queues.
+                        let acquired = match Arc::clone(&concurrency).try_acquire_owned() {
+                            Ok(permit) => Ok(permit),
+                            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                info!(
+                                    job = %name,
+                                    limit = MAX_CONCURRENT_BACKUPS,
+                                    "Waiting for a free backup slot"
+                                );
+                                concurrency.acquire_owned().await.map_err(|_| ())
+                            }
+                            Err(tokio::sync::TryAcquireError::Closed) => Err(()),
+                        };
+                        let _permit = match acquired {
+                            Ok(permit) => permit,
+                            Err(()) => {
+                                // The semaphore is closed only by the shutdown
+                                // arm below. `run` was never polled, so its
+                                // in-flight guard never existed; clear the
+                                // entry here instead.
+                                info!(job = %name, "Shutdown in progress; skipping queued backup");
+                                in_flight
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .remove(&name);
+                                return;
+                            }
+                        };
+                        run.await;
+                    });
                 }
 
                 _ = &mut shutdown => {
                     info!("Shutdown signal received, finishing current jobs");
+                    concurrency.close();
                     break;
                 }
             }
@@ -456,7 +510,7 @@ impl Scheduler {
     }
 
     async fn run_backup_job(
-        config: ResolvedConfig,
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
@@ -473,9 +527,12 @@ impl Scheduler {
             NotificationManager::with_rate_limiter(&config, j.notifications.clone(), rate_limiter)
         });
 
+        let blocking_config = Arc::clone(&config);
         let blocking_name = name.clone();
-        let join_result =
-            tokio::task::spawn_blocking(move || Backup::run(&config, &blocking_name, false)).await;
+        let join_result = tokio::task::spawn_blocking(move || {
+            Backup::run(&blocking_config, &blocking_name, false)
+        })
+        .await;
 
         match join_result {
             Ok(Ok(result)) if result.partial => {
@@ -892,7 +949,7 @@ mod tests {
     impl JobRunner for RecordingRunner {
         fn run(
             &self,
-            _config: ResolvedConfig,
+            _config: Arc<ResolvedConfig>,
             _job: Option<Job>,
             name: String,
             in_flight: Arc<Mutex<HashSet<String>>>,
@@ -1131,6 +1188,181 @@ mod tests {
             JOB_COUNT
         );
         assert!(result.unwrap().is_ok());
+    }
+
+    /// A stub runner whose jobs take real time, so several can overlap.
+    /// Tracks the peak number of jobs running at once and how many were
+    /// started and finished, to observe the concurrency bound from outside.
+    struct ConcurrencyProbeRunner {
+        job_duration: Duration,
+        running: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        started: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+    }
+
+    impl ConcurrencyProbeRunner {
+        fn new(job_duration: Duration) -> Self {
+            Self {
+                job_duration,
+                running: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                started: Arc::new(AtomicUsize::new(0)),
+                finished: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl JobRunner for ConcurrencyProbeRunner {
+        fn run(
+            &self,
+            _config: Arc<ResolvedConfig>,
+            _job: Option<Job>,
+            name: String,
+            in_flight: Arc<Mutex<HashSet<String>>>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let job_duration = self.job_duration;
+            let running = Arc::clone(&self.running);
+            let peak = Arc::clone(&self.peak);
+            let started = Arc::clone(&self.started);
+            let finished = Arc::clone(&self.finished);
+            Box::pin(async move {
+                let _guard = InFlightGuard {
+                    in_flight,
+                    name: name.clone(),
+                };
+                started.fetch_add(1, Ordering::SeqCst);
+                let now_running = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now_running, Ordering::SeqCst);
+                tokio::time::sleep(job_duration).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                finished.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    /// Drives `loop_future` until `counter` reaches `target`, failing (not
+    /// hanging) if the scheduler exits or `deadline` passes first.
+    async fn drive_until(
+        loop_future: &mut Pin<Box<impl Future<Output = Result<(), AppError>>>>,
+        counter: &AtomicUsize,
+        target: usize,
+        deadline: Duration,
+        what: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + deadline;
+        loop {
+            tokio::select! {
+                result = &mut *loop_future => {
+                    panic!("scheduler loop exited unexpectedly: {:?}", result);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    let count = counter.load(Ordering::SeqCst);
+                    if count >= target {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "timed out waiting for {}: {} of {}",
+                        what,
+                        count,
+                        target
+                    );
+                }
+            }
+        }
+    }
+
+    /// M6: with more due jobs than `MAX_CONCURRENT_BACKUPS`, at most that
+    /// many run at once and the rest queue until a slot frees up. The
+    /// peak is asserted *equal* to the limit, not merely `<=`, so a bound
+    /// that is accidentally tighter (or a probe that never overlaps) also
+    /// fails the test.
+    #[tokio::test]
+    async fn test_concurrent_backups_are_bounded_by_limit() {
+        const JOB_COUNT: usize = 3 * MAX_CONCURRENT_BACKUPS;
+
+        let config = config_with_many_due_jobs(JOB_COUNT);
+        let mut scheduler = Scheduler::new(config).unwrap();
+        let runner = ConcurrencyProbeRunner::new(Duration::from_millis(100));
+        let shutdown = TestShutdown::new();
+
+        let mut loop_future = Box::pin(scheduler.run_loop(
+            shutdown.factory(),
+            Duration::from_millis(10),
+            advancing_clock(),
+            &runner,
+        ));
+
+        drive_until(
+            &mut loop_future,
+            &runner.finished,
+            JOB_COUNT,
+            Duration::from_secs(20),
+            "all jobs to finish",
+        )
+        .await;
+
+        assert_eq!(
+            runner.peak.load(Ordering::SeqCst),
+            MAX_CONCURRENT_BACKUPS,
+            "peak concurrency should hit exactly the limit"
+        );
+    }
+
+    /// On shutdown, jobs still waiting for a slot are abandoned rather
+    /// than started: the drain waits only for backups that were already
+    /// running, so its duration is bounded by the running jobs and no new
+    /// restic process is launched after the stop signal.
+    #[tokio::test]
+    async fn test_shutdown_skips_queued_jobs() {
+        const JOB_COUNT: usize = 3 * MAX_CONCURRENT_BACKUPS;
+        // Long enough that a loaded runner can't finish the first batch
+        // (and let a queued job in) between the batch starting and the
+        // shutdown arm being processed.
+        let job_duration = Duration::from_secs(1);
+
+        let config = config_with_many_due_jobs(JOB_COUNT);
+        let mut scheduler = Scheduler::new(config).unwrap();
+        let runner = ConcurrencyProbeRunner::new(job_duration);
+        let shutdown = TestShutdown::new();
+
+        let mut loop_future = Box::pin(scheduler.run_loop(
+            shutdown.factory(),
+            Duration::from_millis(10),
+            advancing_clock(),
+            &runner,
+        ));
+
+        // Wait until the first batch holds every slot (the remaining jobs
+        // are now parked on the semaphore), then request shutdown.
+        drive_until(
+            &mut loop_future,
+            &runner.started,
+            MAX_CONCURRENT_BACKUPS,
+            Duration::from_secs(20),
+            "first batch to start",
+        )
+        .await;
+        shutdown.trigger();
+
+        // The timeout only guards against a hang; the discriminating
+        // assertions are the counters below (without the skip, the drain
+        // runs the whole queue and `started` reaches JOB_COUNT).
+        let result = tokio::time::timeout(Duration::from_secs(10), loop_future).await;
+        assert!(result.is_ok(), "scheduler did not finish draining");
+        assert!(result.unwrap().is_ok());
+
+        assert_eq!(
+            runner.started.load(Ordering::SeqCst),
+            MAX_CONCURRENT_BACKUPS,
+            "queued jobs must not start after the shutdown signal"
+        );
+        assert_eq!(
+            runner.finished.load(Ordering::SeqCst),
+            MAX_CONCURRENT_BACKUPS,
+            "the running batch must be drained to completion"
+        );
     }
 
     #[test]

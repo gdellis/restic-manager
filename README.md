@@ -214,10 +214,16 @@ If the daemon fails to start 5 times within 5 minutes (for example, a broken con
 stops retrying and the service stays down — check `journalctl -u restic-manager -n 200` and
 `systemctl reset-failed restic-manager` after fixing the cause.
 
+The daemon runs at most 4 backups at a time. When more jobs come due together, the rest wait
+for a free slot (logged as `Waiting for a free backup slot`) and start in the order they came
+due; a job that comes due again while it is running or waiting is skipped for that minute.
+
 On shutdown (`systemctl stop`, which sends SIGTERM) the daemon stops scheduling new jobs and
 waits for in-flight backups to finish before exiting, so a running restic job is never killed
-mid-write. The shipped units use `KillMode=mixed` and a generous `TimeoutStopSec` to preserve
-that behavior — see the comments in the unit files.
+mid-write. Jobs still waiting for a slot are not started; they run at their next scheduled
+time instead, so the stop takes no longer than the backups already running. The shipped units
+use `KillMode=mixed` and a generous `TimeoutStopSec` to preserve that behavior — see the
+comments in the unit files.
 
 ## Configuration Reference
 
