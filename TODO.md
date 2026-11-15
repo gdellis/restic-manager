@@ -3,8 +3,8 @@
 ## Active backlog
 
 1. **#74** — Design a secret-backend abstraction so non-file secret sources (env var, keyring,
-   etc.) do not trigger false "missing password key" errors. *(Open; see the October 2026 review
-   remediation PRs #102-#116, most of which are still awaiting merge.)*
+   etc.) do not trigger false "missing password key" errors. *(Open; the remediation it depends
+   on landed 2026-11-15.)*
 
 ## Short-term code quality
 
@@ -18,6 +18,7 @@
   [blinc](https://github.com/project-blinc/blinc) or another approach).
   *(Icebox; depends on scheduler state exposure.)*
 - **#50** — Shutdown integration tests (done: PR #63; contract-shaped assertions shipped).
-- *(in flight)* October 2026 review remediation: 15 open PRs (#92, #102-#116) covering the
-  Critical/High findings C1, C3, H1, H7, H9-H11, M10, M13, M14, M19, M21 plus ratatui 0.30
-  and TUI in-process data loading. Awaiting maintainer approval before merge.
+- *(done on main)* October 2026 review remediation, phases 0-3: 18 PRs merged covering C1, C3,
+  H1, H4-H7, H9-H11, M13, M14, M21, ratatui 0.30, and TUI in-process data loading (dissolving
+  H2/H3). Follow-up work is tracked as issues #123-#130; sequencing lives in
+  [EXECUTION_PLAN.md](EXECUTION_PLAN.md).
