@@ -40,6 +40,9 @@ struct InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
+        // Poison-tolerant: even if the mutex was poisoned by a panicking
+        // holder (M18), record the removal so the in-flight set can't leak
+        // an entry during unwinding.
         self.in_flight
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -261,6 +264,9 @@ impl Scheduler {
         // factory rather than a single future because both subscriptions
         // must not be live at the same time - a single SIGTERM would then
         // trigger the force-exit path immediately instead of draining.
+        // One rate-limiter instance for the scheduler's lifetime. The
+        // NotificationManager itself stays per-run (its toggles are per-job),
+        // but the rate-limit windows must carry across runs - see H12.
         let rate_limiter = Arc::new(Mutex::new(crate::notifications::RateLimiter::default()));
         let runner = BackupRunner {
             rate_limiter: Arc::clone(&rate_limiter),
