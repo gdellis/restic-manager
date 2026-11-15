@@ -45,15 +45,21 @@ pub struct Notifications {
     /// Base URL of the Telegram Bot API. Overridable in tests so a
     /// failing request can be provoked without touching the real API.
     api_base: String,
-    rate_limiter: Mutex<RateLimiter>,
+    rate_limiter: std::sync::Arc<Mutex<RateLimiter>>,
 }
 
 /// Base URL of the Telegram Bot API.
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
-struct RateLimiter {
+#[derive(Default)]
+struct JobRateState {
     last_failure_notification: Option<std::time::Instant>,
     last_success_notification: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
+pub struct RateLimiter {
+    jobs: std::collections::HashMap<String, JobRateState>,
 }
 
 const MIN_NOTIFICATION_INTERVAL: Duration = Duration::from_secs(300);
@@ -76,10 +82,7 @@ impl Notifications {
             bot_token: telegram.and_then(|t| t.bot_token.clone()),
             chat_id: telegram.and_then(|t| t.chat_id.clone()),
             api_base: TELEGRAM_API_BASE.to_string(),
-            rate_limiter: Mutex::new(RateLimiter {
-                last_failure_notification: None,
-                last_success_notification: None,
-            }),
+            rate_limiter: std::sync::Arc::new(Mutex::new(RateLimiter::default())),
         }
     }
 
@@ -90,6 +93,19 @@ impl Notifications {
     fn with_api_base(config: &ResolvedConfig, api_base: &str) -> Self {
         let mut notifications = Self::new(config);
         notifications.api_base = api_base.to_string();
+        notifications
+    }
+
+    /// Construct a `Notifications` that shares the supplied rate limiter
+    /// instead of creating its own, so the rate-limit window carries
+    /// across multiple `Notifications`/`NotificationManager` instances
+    /// (e.g. across scheduled runs of the same job).
+    pub fn with_rate_limiter(
+        config: &ResolvedConfig,
+        rate_limiter: std::sync::Arc<Mutex<RateLimiter>>,
+    ) -> Self {
+        let mut notifications = Self::new(config);
+        notifications.rate_limiter = rate_limiter;
         notifications
     }
 
@@ -108,7 +124,7 @@ impl Notifications {
             return Ok(());
         }
 
-        if self.is_rate_limited(true) {
+        if self.is_rate_limited(job_name, true) {
             warn!(job = job_name, "Failure notification rate limited");
             return Ok(());
         }
@@ -116,7 +132,7 @@ impl Notifications {
         let message = build_failure_message(job_name, error);
 
         self.send_telegram(&message).await?;
-        self.record_notification_sent(true);
+        self.record_notification_sent(job_name, true);
         info!(job = job_name, "Failure notification sent");
         Ok(())
     }
@@ -138,7 +154,7 @@ impl Notifications {
 
         // Shares the failure rate-limit slot so a partial backup and a hard
         // failure in the same window don't double alert volume.
-        if self.is_rate_limited(true) {
+        if self.is_rate_limited(job_name, true) {
             warn!(job = job_name, "Partial notification rate limited");
             return Ok(());
         }
@@ -146,7 +162,7 @@ impl Notifications {
         let message = build_partial_message(job_name, snapshot_id, error);
 
         self.send_telegram(&message).await?;
-        self.record_notification_sent(true);
+        self.record_notification_sent(job_name, true);
         info!(job = job_name, "Partial notification sent");
         Ok(())
     }
@@ -164,14 +180,14 @@ impl Notifications {
             return Ok(());
         }
 
-        if self.is_rate_limited(false) {
+        if self.is_rate_limited(job_name, false) {
             return Ok(());
         }
 
         let message = build_success_message(job_name, snapshot_id);
 
         self.send_telegram(&message).await?;
-        self.record_notification_sent(false);
+        self.record_notification_sent(job_name, false);
         info!(job = job_name, "Success notification sent");
         Ok(())
     }
@@ -180,24 +196,27 @@ impl Notifications {
     /// `MIN_NOTIFICATION_INTERVAL`. Read-only - callers must call
     /// `record_notification_sent` themselves after a successful send, so a
     /// failed send doesn't consume the rate-limit window.
-    fn is_rate_limited(&self, is_failure: bool) -> bool {
-        let limiter = self.rate_limiter.lock().unwrap();
-        let last_notification = if is_failure {
-            limiter.last_failure_notification
-        } else {
-            limiter.last_success_notification
-        };
+    fn is_rate_limited(&self, job_name: &str, is_failure: bool) -> bool {
+        let limiter = self.rate_limiter.lock().unwrap_or_else(|p| p.into_inner());
+        let last_notification = limiter.jobs.get(job_name).and_then(|state| {
+            if is_failure {
+                state.last_failure_notification
+            } else {
+                state.last_success_notification
+            }
+        });
 
         matches!(last_notification, Some(last) if std::time::Instant::now().duration_since(last) < MIN_NOTIFICATION_INTERVAL)
     }
 
-    fn record_notification_sent(&self, is_failure: bool) {
-        let mut limiter = self.rate_limiter.lock().unwrap();
+    fn record_notification_sent(&self, job_name: &str, is_failure: bool) {
+        let mut limiter = self.rate_limiter.lock().unwrap_or_else(|p| p.into_inner());
         let now = std::time::Instant::now();
+        let state = limiter.jobs.entry(job_name.to_string()).or_default();
         if is_failure {
-            limiter.last_failure_notification = Some(now);
+            state.last_failure_notification = Some(now);
         } else {
-            limiter.last_success_notification = Some(now);
+            state.last_success_notification = Some(now);
         }
     }
 
@@ -281,6 +300,19 @@ impl NotificationManager {
     pub fn new(config: &ResolvedConfig, job_config: NotificationConfig) -> Self {
         Self {
             notifications: Notifications::new(config),
+            job_config,
+        }
+    }
+
+    /// Build a manager that shares the supplied rate limiter with other
+    /// managers, so the rate-limit window carries across runs.
+    pub fn with_rate_limiter(
+        config: &ResolvedConfig,
+        job_config: NotificationConfig,
+        rate_limiter: std::sync::Arc<Mutex<RateLimiter>>,
+    ) -> Self {
+        Self {
+            notifications: Notifications::with_rate_limiter(config, rate_limiter),
             job_config,
         }
     }
@@ -632,9 +664,9 @@ mod tests {
         // window for every real failure afterward.
         let config = test_config();
         let notifications = Notifications::new(&config);
-        assert!(!notifications.is_rate_limited(true));
+        assert!(!notifications.is_rate_limited("test-job", true));
         assert!(
-            !notifications.is_rate_limited(true),
+            !notifications.is_rate_limited("test-job", true),
             "checking the rate limit alone must not consume it"
         );
     }
@@ -643,18 +675,52 @@ mod tests {
     fn test_record_notification_sent_then_rate_limited() {
         let config = test_config();
         let notifications = Notifications::new(&config);
-        assert!(!notifications.is_rate_limited(true));
-        notifications.record_notification_sent(true);
-        assert!(notifications.is_rate_limited(true));
+        assert!(!notifications.is_rate_limited("test-job", true));
+        notifications.record_notification_sent("test-job", true);
+        assert!(notifications.is_rate_limited("test-job", true));
+    }
+
+    #[test]
+    fn test_rate_limit_is_keyed_per_job() {
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        notifications.record_notification_sent("job-a", true);
+        assert!(notifications.is_rate_limited("job-a", true));
+        assert!(!notifications.is_rate_limited("job-b", true));
+    }
+
+    #[test]
+    fn test_rate_limit_shared_across_instances() {
+        let config = test_config();
+        let shared = std::sync::Arc::new(Mutex::new(RateLimiter::default()));
+        let a = Notifications::with_rate_limiter(&config, std::sync::Arc::clone(&shared));
+        let b = Notifications::with_rate_limiter(&config, shared);
+        a.record_notification_sent("job", true);
+        assert!(b.is_rate_limited("job", true));
+    }
+
+    #[test]
+    fn test_rate_limiter_poison_does_not_panic() {
+        let config = test_config();
+        let notifications = Notifications::new(&config);
+        // Poison the inner mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = notifications.rate_limiter.lock().unwrap();
+            panic!("poison");
+        }));
+        // Should not panic.
+        assert!(!notifications.is_rate_limited("job", true));
+        notifications.record_notification_sent("job", true);
+        assert!(notifications.is_rate_limited("job", true));
     }
 
     #[test]
     fn test_failure_and_success_rate_limits_are_independent() {
         let config = test_config();
         let notifications = Notifications::new(&config);
-        notifications.record_notification_sent(true);
-        assert!(notifications.is_rate_limited(true));
-        assert!(!notifications.is_rate_limited(false));
+        notifications.record_notification_sent("test-job", true);
+        assert!(notifications.is_rate_limited("test-job", true));
+        assert!(!notifications.is_rate_limited("test-job", false));
     }
 
     #[tokio::test]
