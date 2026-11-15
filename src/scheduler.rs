@@ -928,15 +928,35 @@ mod tests {
         }
 
         // The scheduler must keep dispatching afterwards, not just survive
-        // the first burst. Give it several more ticks and check the
-        // dispatch count keeps growing.
+        // the first burst. Keep driving the loop and require the dispatch
+        // count to keep growing within a deadline.
+        //
+        // A bare `sleep` here would be a coin toss: `loop_future` is only
+        // advanced when the test polls it, so during a plain sleep no new
+        // jobs are dispatched at all and the assertion depends on how many
+        // already-spawned runner tasks happen to complete inside the
+        // window. On a loaded CI runner that count is often zero, which
+        // fails the test even though the scheduler is healthy.
         let after_first_burst = dispatched.lock().unwrap().len();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(
-            dispatched.lock().unwrap().len() > after_first_burst,
-            "scheduler stopped dispatching after the first burst of {} jobs",
-            after_first_burst
-        );
+        let growth_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::select! {
+                result = &mut loop_future => {
+                    panic!("scheduler loop exited unexpectedly: {:?}", result);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    let count = dispatched.lock().unwrap().len();
+                    if count > after_first_burst {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < growth_deadline,
+                        "scheduler stopped dispatching after the first burst of {} jobs",
+                        after_first_burst
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
