@@ -923,8 +923,12 @@ jobs:
       keep_last: null
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("no keep rules"), "{}", err);
+        let problems = config.problems();
+        assert!(
+            problems.iter().any(|p| p.contains("no keep rules")),
+            "{:?}",
+            problems
+        );
     }
 
     #[test]
@@ -943,7 +947,7 @@ jobs:
       keep_daily: 7
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.validate().is_ok());
+        assert!(config.problems().is_empty(), "{:?}", config.problems());
     }
 
     #[test]
