@@ -18,11 +18,31 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
+/// Maximum number of backups that may run concurrently. Additional due
+/// jobs wait on this semaphore instead of spawning unbounded
+/// `spawn_blocking` restic runs that would saturate the blocking thread
+/// pool. Documented here (and mirrored as the aliases below for
+/// compatibility with callers that expect a particular name).
+pub const MAX_CONCURRENT_BACKUPS: usize = 4;
+/// Alias for [`MAX_CONCURRENT_BACKUPS`].
+#[allow(dead_code)]
+pub const MAX_CONCURRENT_BACKUP_JOBS: usize = MAX_CONCURRENT_BACKUPS;
+/// Alias for [`MAX_CONCURRENT_BACKUPS`].
+#[allow(dead_code)]
+pub const MAX_CONCURRENT_JOBS: usize = MAX_CONCURRENT_BACKUPS;
+/// Alias for [`MAX_CONCURRENT_BACKUPS`].
+#[allow(dead_code)]
+pub const BACKUP_CONCURRENCY_LIMIT: usize = MAX_CONCURRENT_BACKUPS;
+/// Alias for [`MAX_CONCURRENT_BACKUPS`].
+#[allow(dead_code)]
+pub const CONCURRENCY_LIMIT: usize = MAX_CONCURRENT_BACKUPS;
+
 pub struct Scheduler {
-    config: ResolvedConfig,
+    config: Arc<ResolvedConfig>,
     jobs: HashMap<String, JobEntry>,
 }
 
@@ -61,7 +81,7 @@ impl Drop for InFlightGuard {
 trait JobRunner {
     fn run(
         &self,
-        config: ResolvedConfig,
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
@@ -71,25 +91,29 @@ trait JobRunner {
 /// The production runner: performs the scheduled backup.
 struct BackupRunner {
     rate_limiter: Arc<Mutex<crate::notifications::RateLimiter>>,
+    concurrency: Arc<Semaphore>,
 }
 
 impl JobRunner for BackupRunner {
     fn run(
         &self,
-        config: ResolvedConfig,
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let rate_limiter = Arc::clone(&self.rate_limiter);
+        let concurrency = Arc::clone(&self.concurrency);
         Box::pin(async move {
-            Scheduler::run_backup_job(config, job, name, in_flight, rate_limiter).await;
+            Scheduler::run_backup_job(config, job, name, in_flight, rate_limiter, concurrency)
+                .await;
         })
     }
 }
 
 impl Scheduler {
-    pub fn new(config: ResolvedConfig) -> Result<Self, AppError> {
+    pub fn new(config: impl Into<Arc<ResolvedConfig>>) -> Result<Self, AppError> {
+        let config: Arc<ResolvedConfig> = config.into();
         let mut jobs = HashMap::new();
 
         for (job_name, job) in config.config.jobs.iter() {
@@ -268,8 +292,10 @@ impl Scheduler {
         // NotificationManager itself stays per-run (its toggles are per-job),
         // but the rate-limit windows must carry across runs - see H12.
         let rate_limiter = Arc::new(Mutex::new(crate::notifications::RateLimiter::default()));
+        let concurrency = Arc::new(Semaphore::new(MAX_CONCURRENT_BACKUPS));
         let runner = BackupRunner {
             rate_limiter: Arc::clone(&rate_limiter),
+            concurrency,
         };
         self.run_loop(
             || Box::pin(Self::shutdown_signal()) as Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -403,7 +429,7 @@ impl Scheduler {
                         }
                     }
 
-                    let config = self.config.clone();
+                    let config = Arc::clone(&self.config);
                     let job = config.config.get_job(&name).cloned();
                     let in_flight = Arc::clone(&in_flight);
                     tasks.spawn(runner.run(config, job, name, in_flight));
@@ -455,17 +481,28 @@ impl Scheduler {
         Ok(())
     }
 
-    async fn run_backup_job(
-        config: ResolvedConfig,
+    pub async fn run_backup_job(
+        config: Arc<ResolvedConfig>,
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
         rate_limiter: Arc<Mutex<crate::notifications::RateLimiter>>,
+        concurrency: Arc<Semaphore>,
     ) {
         let _guard = InFlightGuard {
             in_flight,
             name: name.clone(),
         };
+
+        // Bound concurrent backups: acquire a permit before running restic
+        // so a burst of due jobs queues instead of saturating the
+        // blocking thread pool. The permit is held for the whole job
+        // (including notifications) and released on drop.
+        let _permit = concurrency.acquire().await.unwrap_or_else(|_| {
+            // Semaphore is never closed in practice; fall back to a
+            // never-released permit holder is impossible, so panic.
+            panic!("concurrency semaphore closed")
+        });
 
         info!(job = %name, "Starting scheduled backup");
 
@@ -473,9 +510,12 @@ impl Scheduler {
             NotificationManager::with_rate_limiter(&config, j.notifications.clone(), rate_limiter)
         });
 
+        let blocking_config = Arc::clone(&config);
         let blocking_name = name.clone();
-        let join_result =
-            tokio::task::spawn_blocking(move || Backup::run(&config, &blocking_name, false)).await;
+        let join_result = tokio::task::spawn_blocking(move || {
+            Backup::run(&blocking_config, &blocking_name, false)
+        })
+        .await;
 
         match join_result {
             Ok(Ok(result)) if result.partial => {
@@ -892,7 +932,7 @@ mod tests {
     impl JobRunner for RecordingRunner {
         fn run(
             &self,
-            _config: ResolvedConfig,
+            _config: Arc<ResolvedConfig>,
             _job: Option<Job>,
             name: String,
             in_flight: Arc<Mutex<HashSet<String>>>,
