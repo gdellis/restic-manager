@@ -13,5 +13,6 @@ pub mod scheduler;
 pub mod secrets;
 pub mod shutdown;
 pub mod snapshot;
+pub mod tui;
 
 pub use cli::cli_run;

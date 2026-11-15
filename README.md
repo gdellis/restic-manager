@@ -53,6 +53,8 @@ Telegram.
   rules
 - **Multiple repositories** — Manage multiple restic repositories from one
   config
+- **Terminal UI dashboard** — browse jobs/repositories, view snapshots, and
+  trigger actions from `restic-manager tui`
 
 ## Quick Start
 
@@ -138,6 +140,25 @@ restic-manager prune documents
 # Start the scheduler daemon (runs in the foreground; see
 # "Running as a systemd service" below to run it in the background)
 restic-manager daemon
+
+# Open the interactive terminal dashboard
+restic-manager tui
+
+### TUI keybindings
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `j` / `k` | Select sidebar item |
+| `n` / `k` | Move selection inside the current list (`j` also moves down) |
+| `Enter` | Select highlighted job/repository and load details |
+| `r` | Run selected job |
+| `R` | Restore (full overlay coming in a future release) |
+| `l` | List snapshots for selected job |
+| `p` | Prune selected job |
+| `c` | Check selected job |
+| `L` | Switch to Logs view |
+| `?` | Toggle help overlay |
+| `q` / `Esc` / `Ctrl-C` | Quit |
 
 # List configured jobs and repositories
 restic-manager jobs
