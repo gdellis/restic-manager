@@ -41,6 +41,27 @@ pub struct SnapshotList {
     pub snapshots: Vec<Snapshot>,
 }
 
+/// One policy group from `restic forget --json`. restic emits one group per
+/// (host, tags, paths) combination; only the `remove` list matters here.
+///
+/// `remove` is required so a schema rename surfaces as a parse error rather
+/// than an empty result, but restic marshals an empty Go slice as `null`
+/// when nothing is removed, so `null` is accepted and treated as empty.
+/// The other keys restic emits (`keep`, `reasons`, `host`, ...) are ignored.
+#[derive(Debug, Deserialize)]
+struct ForgetGroup {
+    #[serde(deserialize_with = "null_as_empty_vec")]
+    remove: Vec<Snapshot>,
+}
+
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 pub struct SnapshotManager;
 
 impl SnapshotManager {
@@ -156,21 +177,14 @@ impl SnapshotManager {
             return Ok(vec![]);
         }
 
-        let groups: Vec<serde_json::Value> = serde_json::from_str(output)
+        let groups: Vec<ForgetGroup> = serde_json::from_str(output)
             .map_err(|e| AppError::Other(format!("Failed to parse forget JSON: {}", e)))?;
 
-        let mut removed_ids = Vec::new();
-        for group in &groups {
-            if let Some(removed) = group["remove"].as_array() {
-                for snap in removed {
-                    if let Some(id) = snap["id"].as_str() {
-                        removed_ids.push(id.to_string());
-                    }
-                }
-            }
-        }
-
-        Ok(removed_ids)
+        Ok(groups
+            .into_iter()
+            .flat_map(|group| group.remove)
+            .map(|snap| snap.id)
+            .collect())
     }
 
     pub fn prune(config: &ResolvedConfig, job_name: &str) -> Result<(), AppError> {
@@ -430,34 +444,82 @@ mod tests {
         assert!(SnapshotManager::parse_snapshots("not json").is_err());
     }
 
+    // Verbatim `restic forget --json` outputs captured against a real local
+    // repository with restic 0.16.4 (five snapshots of one path, all tagged
+    // "daily", so restic produces a single policy group). The first fixture is
+    // `restic forget --json --keep-last 2` (three removed); the second is
+    // `--keep-last 10` on the remaining two, where restic marshals the empty
+    // remove list as `null`, not `[]`. `--dry-run` emits the identical shape.
+    const RESTIC_FORGET_THREE_REMOVED: &str = r#"[{"tags":null,"host":"baggins-zorin","paths":["/tmp/opencode/i134-data"],"keep":[{"time":"2026-11-15T14:23:35.537689527-07:00","parent":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","tree":"bb1a1a61c76ae83aab6e37d7f03dc6debf7db25c127b6f70534bc9ae545813c6","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"bfe7610ce22dbf78fc27daac53de88e36437b901c6cfc8402d7e3203dc0d2e59","short_id":"bfe7610c"},{"time":"2026-11-15T14:23:34.802798069-07:00","parent":"3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c","tree":"fb80a4aab048f801fbca006adae6cb275b1d0b71b4b49746547a18056259d7ab","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","short_id":"bdd4f2de"}],"remove":[{"time":"2026-11-15T14:23:34.070005663-07:00","parent":"5be56177839b6133b21d3fe2e112d1121542019a7dbec8b9460ff263861c896e","tree":"d0550082df31054bd5c48a3ddc17af063ac88e3eca6b652dd959e6538b41b765","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c","short_id":"3cfcc0c4"},{"time":"2026-11-15T14:23:33.34174476-07:00","parent":"c380b0e868e927fdb47db4078a9c9609044bb38940facb7edb0686e0ad3c2660","tree":"6cce98981de1b45c10425751c2497e63b4e6a8ffe4fef035777d28495852fe95","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"5be56177839b6133b21d3fe2e112d1121542019a7dbec8b9460ff263861c896e","short_id":"5be56177"},{"time":"2026-11-15T14:23:32.611896407-07:00","tree":"19527dd2d22a48f3c70c66ec1ff0b594465f57779133f88e5fca1013d2dd82c9","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"c380b0e868e927fdb47db4078a9c9609044bb38940facb7edb0686e0ad3c2660","short_id":"c380b0e8"}],"reasons":[{"snapshot":{"time":"2026-11-15T14:23:35.537689527-07:00","parent":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","tree":"bb1a1a61c76ae83aab6e37d7f03dc6debf7db25c127b6f70534bc9ae545813c6","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4"},"matches":["last snapshot"],"counters":{"last":1}},{"snapshot":{"time":"2026-11-15T14:23:34.802798069-07:00","parent":"3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c","tree":"fb80a4aab048f801fbca006adae6cb275b1d0b71b4b49746547a18056259d7ab","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4"},"matches":["last snapshot"],"counters":{}}]}]"#;
+
+    const RESTIC_FORGET_REMOVE_NULL: &str = r#"[{"tags":null,"host":"baggins-zorin","paths":["/tmp/opencode/i134-data"],"keep":[{"time":"2026-11-15T14:23:35.537689527-07:00","parent":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","tree":"bb1a1a61c76ae83aab6e37d7f03dc6debf7db25c127b6f70534bc9ae545813c6","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"bfe7610ce22dbf78fc27daac53de88e36437b901c6cfc8402d7e3203dc0d2e59","short_id":"bfe7610c"},{"time":"2026-11-15T14:23:34.802798069-07:00","parent":"3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c","tree":"fb80a4aab048f801fbca006adae6cb275b1d0b71b4b49746547a18056259d7ab","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","short_id":"bdd4f2de"}],"remove":null,"reasons":[{"snapshot":{"time":"2026-11-15T14:23:35.537689527-07:00","parent":"bdd4f2deceb0c0c67f65e6472d02fe2666799d6b487b56e03f91abdd304f8296","tree":"bb1a1a61c76ae83aab6e37d7f03dc6debf7db25c127b6f70534bc9ae545813c6","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4"},"matches":["last snapshot"],"counters":{"last":9}},{"snapshot":{"time":"2026-11-15T14:23:34.802798069-07:00","parent":"3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c","tree":"fb80a4aab048f801fbca006adae6cb275b1d0b71b4b49746547a18056259d7ab","paths":["/tmp/opencode/i134-data"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4"},"matches":["last snapshot"],"counters":{"last":8}}]}]"#;
+
     #[test]
-    fn test_parse_forget_output_json() {
-        // Real restic `forget --json` shape: a single JSON array of policy
-        // groups, each with a "remove" (not "removed") array of snapshots.
-        let output = r#"[{"tags":null,"host":"h","paths":["/x"],"keep":[],"remove":[{"id":"snap1","short_id":"abc"}],"reasons":[]}]"#;
-        let result = SnapshotManager::parse_forget_output(output);
-        assert!(result.is_ok());
-        let removed = result.unwrap();
-        assert_eq!(removed, vec!["snap1"]);
+    fn test_parse_forget_output_real_output_three_removed() {
+        let removed = SnapshotManager::parse_forget_output(RESTIC_FORGET_THREE_REMOVED).unwrap();
+        assert_eq!(
+            removed,
+            vec![
+                "3cfcc0c4eea09911041ef813dd6d9b76e70a419abbf3a693d6cf7a9741ea427c",
+                "5be56177839b6133b21d3fe2e112d1121542019a7dbec8b9460ff263861c896e",
+                "c380b0e868e927fdb47db4078a9c9609044bb38940facb7edb0686e0ad3c2660",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_forget_output_real_output_remove_null() {
+        // Nothing to remove: restic emits "remove":null. Must parse as empty,
+        // not fail on a null where an array was expected.
+        let removed = SnapshotManager::parse_forget_output(RESTIC_FORGET_REMOVE_NULL).unwrap();
+        assert!(removed.is_empty());
     }
 
     #[test]
     fn test_parse_forget_output_multiple_groups() {
         let output = r#"[
-            {"tags":null,"host":"h","paths":["/x"],"keep":[],"remove":[{"id":"snap1","short_id":"abc"}],"reasons":[]},
-            {"tags":null,"host":"h","paths":["/y"],"keep":[],"remove":[{"id":"snap2","short_id":"def"},{"id":"snap3","short_id":"ghi"}],"reasons":[]}
+            {"tags":null,"host":"h","paths":["/x"],"keep":[],"remove":[{"id":"snap1","short_id":"abc","time":"2026-01-01T00:00:00Z"}],"reasons":[]},
+            {"tags":null,"host":"h","paths":["/y"],"keep":[],"remove":[{"id":"snap2","short_id":"def","time":"2026-01-01T00:00:00Z"},{"id":"snap3","short_id":"ghi","time":"2026-01-01T00:00:00Z"}],"reasons":[]}
         ]"#;
-        let result = SnapshotManager::parse_forget_output(output);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), vec!["snap1", "snap2", "snap3"]);
+        let removed = SnapshotManager::parse_forget_output(output).unwrap();
+        assert_eq!(removed, vec!["snap1", "snap2", "snap3"]);
     }
 
     #[test]
     fn test_parse_forget_output_empty_remove_array() {
         let output = r#"[{"tags":null,"host":"h","paths":["/x"],"keep":[{"id":"kept1"}],"remove":[],"reasons":[]}]"#;
-        let result = SnapshotManager::parse_forget_output(output);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let removed = SnapshotManager::parse_forget_output(output).unwrap();
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_forget_output_missing_remove_key_errors() {
+        // Schema change: restic renames "remove" — must surface as a parse
+        // error, not silently report zero removed snapshots.
+        let output = r#"[{"tags":null,"host":"h","paths":["/x"],"keep":[],"removed":[{"id":"snap1","time":"2026-01-01T00:00:00Z"}],"reasons":[]}]"#;
+        assert!(SnapshotManager::parse_forget_output(output).is_err());
+    }
+
+    #[test]
+    fn test_parse_forget_output_missing_id_errors() {
+        // Schema change: a removed snapshot without "id" — must error, not be
+        // skipped and undercount what was removed.
+        let output = r#"[{"remove":[{"snapshot_id":"snap1","time":"2026-01-01T00:00:00Z"}]}]"#;
+        assert!(SnapshotManager::parse_forget_output(output).is_err());
+    }
+
+    #[test]
+    fn test_parse_forget_output_mistyped_remove_errors() {
+        // Schema change: "remove" becomes a count — must error, not default.
+        let output = r#"[{"remove":3}]"#;
+        assert!(SnapshotManager::parse_forget_output(output).is_err());
+    }
+
+    #[test]
+    fn test_parse_forget_output_unknown_extra_fields_ok() {
+        let output = r#"[{"remove":[{"id":"snap1","time":"2026-01-01T00:00:00Z","brand_new_field":42}],"brand_new_group_field":true}]"#;
+        let removed = SnapshotManager::parse_forget_output(output).unwrap();
+        assert_eq!(removed, vec!["snap1"]);
     }
 
     #[test]
