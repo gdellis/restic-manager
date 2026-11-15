@@ -162,6 +162,7 @@ restic-manager tui
 | `p` | Prune selected job |
 | `c` | Check selected job |
 | `L` | Switch to Logs view |
+| `u` | Reload config/secrets from disk (jobs, repositories, details) |
 | `?` | Toggle help overlay |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 

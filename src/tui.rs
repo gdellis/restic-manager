@@ -19,6 +19,8 @@ const TICK_MS: u64 = 100;
 const MAX_LOG_LINES: usize = 500;
 const STATUS_MESSAGE_SECONDS: u64 = 5;
 const DAEMON_CHECK_SECONDS: u64 = 5;
+const FOOTER_HINTS: &str =
+    "?:help n/k list Enter select r:run R:restore l:list p:prune c:check L:logs u:reload q:quit";
 
 // ---------------------------------------------------------------------------
 // Log sink
@@ -356,17 +358,13 @@ fn event_loop(
         .map_err(|e| AppError::Other(format!("draw: {e}")))?;
 
     // Fill the job and repository lists from the config already in memory.
-    // Note: config edits while the TUI is running are not picked up until a
-    // restart. A reload key can be added in a future wave.
+    // Config edits while the TUI is running are picked up by the `u` reload
+    // key, which re-reads the disk state (see `reload_config`).
     load_lists(Arc::clone(&app), &config);
+    let mut config = config;
 
     loop {
-        terminal
-            .draw(|f| {
-                let app_lock = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                ui(f, &app_lock);
-            })
-            .map_err(|e| AppError::Other(format!("draw: {e}")))?;
+        draw_ui(terminal, &app)?;
 
         {
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -379,19 +377,61 @@ fn event_loop(
         if event::poll(Duration::from_millis(TICK_MS))
             .map_err(|e| AppError::Other(format!("event::poll: {e}")))?
         {
-            if let Event::Key(key) =
-                event::read().map_err(|e| AppError::Other(format!("event::read: {e}")))?
-            {
-                if handle_key(key, Arc::clone(&app), &config)? {
-                    let child_pids = {
-                        let a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                        Arc::clone(&a.child_pids)
-                    };
-                    kill_remaining_children(&child_pids);
-                    return Ok(());
+            let read = event::read().map_err(|e| AppError::Other(format!("event::read: {e}")))?;
+            match classify_event(read) {
+                UiEvent::Key(key) => {
+                    if handle_key(key, Arc::clone(&app), &mut config)? {
+                        let child_pids = {
+                            let a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            Arc::clone(&a.child_pids)
+                        };
+                        kill_remaining_children(&child_pids);
+                        return Ok(());
+                    }
                 }
+                UiEvent::Resize => {
+                    // A resize invalidates the current layout. Ratatui
+                    // re-queries the terminal size on every draw, so drawing
+                    // one frame here is all the re-layout work needed; the
+                    // loop-top draw keeps the usual 100ms cadence afterwards.
+                    draw_ui(terminal, &app)?;
+                }
+                UiEvent::Other => {}
             }
         }
+    }
+}
+
+fn draw_ui(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &Arc<Mutex<App>>,
+) -> Result<(), AppError> {
+    terminal
+        .draw(|f| {
+            let app_lock = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            ui(f, &app_lock);
+        })
+        .map_err(|e| AppError::Other(format!("draw: {e}")))?;
+    Ok(())
+}
+
+/// How the event loop treats a crossterm event.
+///
+/// Only three shapes matter: keys go to `handle_key`, a resize forces an
+/// immediate redraw at the new terminal size, and everything else (focus,
+/// mouse, paste) is ignored by the TUI today.
+#[derive(Debug, PartialEq, Eq)]
+enum UiEvent {
+    Key(KeyEvent),
+    Resize,
+    Other,
+}
+
+fn classify_event(event: Event) -> UiEvent {
+    match event {
+        Event::Key(key) => UiEvent::Key(key),
+        Event::Resize(_, _) => UiEvent::Resize,
+        _ => UiEvent::Other,
     }
 }
 
@@ -400,7 +440,11 @@ fn event_loop(
 // ---------------------------------------------------------------------------
 
 /// Returns `Ok(true)` when the user requested quit.
-fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>, config: &TuiConfig) -> Result<bool, AppError> {
+fn handle_key(
+    key: KeyEvent,
+    app: Arc<Mutex<App>>,
+    config: &mut TuiConfig,
+) -> Result<bool, AppError> {
     {
         let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if a.show_help {
@@ -540,6 +584,9 @@ fn handle_key(key: KeyEvent, app: Arc<Mutex<App>>, config: &TuiConfig) -> Result
             let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             a.sidebar_state.select(Some(2));
         }
+        KeyCode::Char('u') => {
+            reload_config(&app, config);
+        }
         _ => {}
     }
     Ok(false)
@@ -643,6 +690,92 @@ fn load_lists(app: Arc<Mutex<App>>, config: &TuiConfig) {
     a.data_loaded.repos = true;
     for problem in &config.problems {
         a.push_log(format!("config problem: {problem}"));
+    }
+}
+
+/// Re-reads the config and secrets from disk and replaces the UI state
+/// derived from them. Bound to the `u` key.
+///
+/// The load is as lenient as the startup load (`TuiConfig::load`): a
+/// partially broken config still loads, and its problems are shown in the
+/// UI. Where it differs from startup is the unreadable case: a config that
+/// fails to load at all is not fatal here — the error is logged and shown
+/// in the status bar, and the previous config stays in effect.
+///
+/// The load is synchronous file I/O (no subprocess) on the event-loop
+/// thread, so no state can change underneath it and no stale-response
+/// guard is needed. The snapshot lister is intentionally left out of this:
+/// it stays a background subprocess and captures a config clone at request
+/// time (the H6 guard in `apply_snapshot_result` is unaffected).
+fn reload_config(app: &Arc<Mutex<App>>, config: &mut TuiConfig) {
+    match TuiConfig::load() {
+        Ok(new_config) => {
+            let (jobs, repos, problems) = (
+                new_config.job_names().len(),
+                new_config.repo_names().len(),
+                new_config.problems.len(),
+            );
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.push_log(format!(
+                "config reloaded from disk: {jobs} job(s), {repos} repo(s), {problems} problem(s)"
+            ));
+            apply_reloaded_config(&mut a, &new_config);
+            *config = new_config;
+            a.set_status("config reloaded".to_string());
+        }
+        Err(e) => {
+            let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            a.push_log(format!(
+                "config reload failed; keeping previous config: {e}"
+            ));
+            a.set_status(format!("config reload failed: {e}"));
+        }
+    }
+}
+
+/// Brings the UI state in line with a freshly loaded config: replaces the
+/// job/repo lists and the problems panel, clamps the highlight indices in
+/// case a list shrank, and re-resolves (or drops) the selected entry's
+/// detail pane.
+///
+/// Snapshots for a still-selected job are left untouched: they come from
+/// the repository via `l` and clobbering them from a new load path would be
+/// the same pattern H6 guards the async lister against.
+fn apply_reloaded_config(a: &mut App, config: &TuiConfig) {
+    a.jobs = config.job_names();
+    a.repos = config.repo_names();
+    a.data_loaded.jobs = true;
+    a.data_loaded.repos = true;
+    a.job_list_index = a.job_list_index.min(a.jobs.len().saturating_sub(1));
+    a.repo_list_index = a.repo_list_index.min(a.repos.len().saturating_sub(1));
+
+    a.problems = config.problems.clone();
+    for problem in &config.problems {
+        a.push_log(format!("config problem: {problem}"));
+    }
+
+    if let Some(name) = a.selected_job.clone() {
+        if let Some(job) = config.resolved.config.get_job(&name).cloned() {
+            a.job_details = Some(job);
+        } else {
+            a.push_log(format!(
+                "selected job '{name}' is gone from the reloaded config; selection cleared"
+            ));
+            a.selected_job = None;
+            a.job_details = None;
+            a.snapshots.clear();
+        }
+    }
+    if let Some(name) = a.selected_repo.clone() {
+        if let Some(repo) = config.resolved.config.get_repository(&name).cloned() {
+            a.repo_details = Some(repo);
+        } else {
+            a.push_log(format!(
+                "selected repository '{name}' is gone from the reloaded config; selection cleared"
+            ));
+            a.selected_repo = None;
+            a.repo_details = None;
+        }
     }
 }
 
@@ -921,8 +1054,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     }
 }
 
-fn render_help(f: &mut ratatui::Frame) {
-    let help_text = "\
+const HELP_TEXT: &str = "\
 Keybindings:\n\
 \n\
 ↑/↓ — select sidebar item\n\
@@ -935,15 +1067,17 @@ l — list snapshots for selected job\n\
 p — prune selected job\n\
 c — check selected job\n\
 L — switch to Logs view\n\
+u — reload config and secrets from disk\n\
 ? — toggle this help\n\
 q / Esc / Ctrl-C — quit";
 
+fn render_help(f: &mut ratatui::Frame) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Help")
         .title_alignment(Alignment::Center)
         .border_style(Style::default().fg(Color::Cyan));
-    let paragraph = Paragraph::new(help_text)
+    let paragraph = Paragraph::new(HELP_TEXT)
         .block(block)
         .alignment(Alignment::Center)
         .wrap(ratatui::widgets::Wrap { trim: true });
@@ -1175,15 +1309,23 @@ fn build_status_text(app: &App) -> String {
         return format!("running: {label}  ?:help  q:quit");
     }
 
-    "?:help n/k list Enter select r:run R:restore l:list p:prune c:check L:logs q:quit".to_string()
+    FOOTER_HINTS.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::cmdline_is_daemon;
-    use super::{apply_snapshot_result, App, LogSink};
+    use super::{
+        apply_reloaded_config, apply_snapshot_result, classify_event, App, LogSink, TuiConfig,
+        UiEvent, FOOTER_HINTS, HELP_TEXT,
+    };
+    use crate::config::{Config, Job, NotificationConfig, Repository, ResolvedConfig};
     use crate::errors::AppError;
+    use crate::secrets::Secrets;
     use crate::snapshot::{Snapshot, SnapshotList};
+    use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::PathBuf;
 
     fn cmdline(args: &[&str]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1318,5 +1460,171 @@ mod tests {
             !app.data_loaded.snapshots,
             "a stale error must not mark the current job as loaded"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // M11: resize classification
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn resize_event_is_classified_for_redraw() {
+        // Regression for M11: Resize used to fall into the unhandled
+        // wildcard, so nothing forced a re-layout at the new size.
+        assert_eq!(classify_event(Event::Resize(120, 36)), UiEvent::Resize);
+    }
+
+    #[test]
+    fn key_event_is_classified_for_handling() {
+        let key = KeyEvent::from(KeyCode::Char('u'));
+        assert_eq!(classify_event(Event::Key(key)), UiEvent::Key(key));
+    }
+
+    #[test]
+    fn other_events_stay_unhandled() {
+        let mouse = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_eq!(classify_event(mouse), UiEvent::Other);
+        assert_eq!(classify_event(Event::FocusGained), UiEvent::Other);
+    }
+
+    // -------------------------------------------------------------------
+    // M12: reload applies fresh config state
+    // -------------------------------------------------------------------
+
+    fn test_job(repo: &str, path: &str) -> Job {
+        Job {
+            repository: repo.to_string(),
+            paths: vec![PathBuf::from(path)],
+            exclude_file: None,
+            exclude_patterns: None,
+            schedule: None,
+            retention: None,
+            notifications: NotificationConfig::default(),
+            pre_backup: vec![],
+            post_backup: vec![],
+        }
+    }
+
+    /// A config with one repo (`local`) and the given job names.
+    fn tui_config(job_names: &[&str]) -> TuiConfig {
+        let mut repositories = BTreeMap::new();
+        repositories.insert(
+            "local".to_string(),
+            Repository {
+                repo: "/srv/restic".to_string(),
+                password_key: "test_pass".to_string(),
+                log_cli_output: None,
+            },
+        );
+        let jobs = job_names
+            .iter()
+            .map(|name| (name.to_string(), test_job("local", "/data")))
+            .collect::<BTreeMap<_, _>>();
+        TuiConfig {
+            resolved: ResolvedConfig {
+                config: Config { repositories, jobs },
+                secrets: Secrets {
+                    values: HashMap::new(),
+                    telegram: None,
+                },
+            },
+            problems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reload_picks_up_a_job_added_to_the_config() {
+        let mut app = new_app();
+        apply_reloaded_config(&mut app, &tui_config(&["daily"]));
+        apply_reloaded_config(&mut app, &tui_config(&["beta", "daily"]));
+
+        assert_eq!(app.jobs, vec!["beta".to_string(), "daily".to_string()]);
+        assert!(app.data_loaded.jobs);
+    }
+
+    #[test]
+    fn reload_refreshes_the_selected_jobs_details() {
+        let mut app = new_app();
+        apply_reloaded_config(&mut app, &tui_config(&["daily"]));
+        app.selected_job = Some("daily".to_string());
+        app.job_list_index = 0;
+
+        apply_reloaded_config(&mut app, &tui_config(&["daily"]));
+
+        let details = app.job_details.expect("details must be re-resolved");
+        assert_eq!(details.repository, "local");
+    }
+
+    #[test]
+    fn reload_drops_a_selection_that_vanished_and_clamps_the_highlight() {
+        let mut app = new_app();
+        apply_reloaded_config(&mut app, &tui_config(&["daily", "weekly"]));
+        app.selected_job = Some("weekly".to_string());
+        app.job_details = Some(test_job("local", "/data"));
+        app.snapshots = vec![snapshot("ccc333")];
+        app.job_list_index = 1;
+
+        apply_reloaded_config(&mut app, &tui_config(&["daily"]));
+
+        assert_eq!(app.selected_job, None, "vanished job must be deselected");
+        assert!(app.job_details.is_none());
+        assert!(
+            app.snapshots.is_empty(),
+            "orphaned snapshots must be cleared"
+        );
+        assert_eq!(app.job_list_index, 0, "highlight must be clamped in range");
+        assert!(
+            log_lines(&app)
+                .iter()
+                .any(|l| l.contains("gone from the reloaded config")),
+            "the deselection must be visible in the log view: {:?}",
+            log_lines(&app)
+        );
+    }
+
+    #[test]
+    fn reload_replaces_the_problems_panel() {
+        let mut app = new_app();
+        apply_reloaded_config(&mut app, &tui_config(&["daily"]));
+        assert!(app.problems.is_empty());
+
+        let mut broken = tui_config(&["daily"]);
+        broken.problems.push("missing secret".to_string());
+        apply_reloaded_config(&mut app, &broken);
+
+        assert_eq!(app.problems, vec!["missing secret".to_string()]);
+        assert!(
+            log_lines(&app).iter().any(|l| l.contains("config problem")),
+            "problems must be logged like the startup load: {:?}",
+            log_lines(&app)
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // M12: the new binding is documented everywhere keys are listed
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn reload_key_is_documented_in_help_and_footer() {
+        assert!(
+            HELP_TEXT.contains("u — reload"),
+            "help overlay: {HELP_TEXT}"
+        );
+        assert!(
+            FOOTER_HINTS.contains("u:reload"),
+            "status footer: {FOOTER_HINTS}"
+        );
+    }
+
+    #[test]
+    fn reload_key_does_not_collide_with_documented_bindings() {
+        // The documented bindings from the README table. `u` must stay free:
+        // it is the reload binding as of M12.
+        let used = ['q', '?', 'j', 'n', 'k', 'r', 'R', 'l', 'p', 'P', 'c', 'L'];
+        assert!(!used.contains(&'u'));
     }
 }
