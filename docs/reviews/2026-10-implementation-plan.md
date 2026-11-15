@@ -1,6 +1,6 @@
 # Implementation Plan — restic-manager review remediation
 
-**Source:** `CODE_REVIEW_2026-10.md` (37 numbered findings; C2 refuted and removed)
+**Source:** `2026-10-code-review.md` (37 numbered findings; C2 refuted and removed)
 **Branch:** `feat/tui` @ `cec8edf` — plan to land as a series of PRs against `main`
 **Date:** 2026-10-28
 
