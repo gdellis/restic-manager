@@ -70,7 +70,9 @@ impl Drop for InFlightGuard {
 /// backups, which a unit test must not do. The runner receives the
 /// shared in-flight set and is responsible for holding the job's
 /// in-flight guard for the duration of the job, so the job stays marked
-/// as running until it finishes (or the future is dropped).
+/// as running until it finishes (or the future is dropped). If the
+/// dispatch wrapper skips the job before polling this future (shutdown
+/// while queued for a slot), it clears the in-flight entry itself.
 trait JobRunner {
     fn run(
         &self,
@@ -427,16 +429,23 @@ impl Scheduler {
                     let in_flight = Arc::clone(&in_flight);
                     let concurrency = Arc::clone(&concurrency);
                     tasks.spawn(async move {
-                        if concurrency.available_permits() == 0 {
-                            info!(
-                                job = %name,
-                                limit = MAX_CONCURRENT_BACKUPS,
-                                "Waiting for a free backup slot"
-                            );
-                        }
-                        let _permit = match concurrency.acquire_owned().await {
+                        // Try without waiting first so the "waiting" log is
+                        // emitted exactly when the job actually queues.
+                        let acquired = match Arc::clone(&concurrency).try_acquire_owned() {
+                            Ok(permit) => Ok(permit),
+                            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                info!(
+                                    job = %name,
+                                    limit = MAX_CONCURRENT_BACKUPS,
+                                    "Waiting for a free backup slot"
+                                );
+                                concurrency.acquire_owned().await.map_err(|_| ())
+                            }
+                            Err(tokio::sync::TryAcquireError::Closed) => Err(()),
+                        };
+                        let _permit = match acquired {
                             Ok(permit) => permit,
-                            Err(_) => {
+                            Err(()) => {
                                 // The semaphore is closed only by the shutdown
                                 // arm below. `run` was never polled, so its
                                 // in-flight guard never existed; clear the
@@ -1308,7 +1317,10 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_skips_queued_jobs() {
         const JOB_COUNT: usize = 3 * MAX_CONCURRENT_BACKUPS;
-        let job_duration = Duration::from_millis(500);
+        // Long enough that a loaded runner can't finish the first batch
+        // (and let a queued job in) between the batch starting and the
+        // shutdown arm being processed.
+        let job_duration = Duration::from_secs(1);
 
         let config = config_with_many_due_jobs(JOB_COUNT);
         let mut scheduler = Scheduler::new(config).unwrap();
@@ -1334,14 +1346,11 @@ mod tests {
         .await;
         shutdown.trigger();
 
-        // Without the skip, the drain would run the remaining batches
-        // sequentially (3 x job_duration); with it, only the running batch
-        // has to finish.
-        let result = tokio::time::timeout(job_duration * 2, loop_future).await;
-        assert!(
-            result.is_ok(),
-            "drain should finish once the running batch completes, not run the queue"
-        );
+        // The timeout only guards against a hang; the discriminating
+        // assertions are the counters below (without the skip, the drain
+        // runs the whole queue and `started` reaches JOB_COUNT).
+        let result = tokio::time::timeout(Duration::from_secs(10), loop_future).await;
+        assert!(result.is_ok(), "scheduler did not finish draining");
         assert!(result.unwrap().is_ok());
 
         assert_eq!(
