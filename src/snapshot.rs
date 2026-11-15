@@ -42,10 +42,12 @@ pub struct SnapshotList {
 }
 
 /// One policy group from `restic forget --json`. restic emits one group per
-/// (host, tags, paths) combination; only the `remove` list matters here.
+/// `--group-by` key (default `host,paths`); only the `remove` list matters
+/// here. Each entry is the same object `snapshots --json` emits, so it is
+/// parsed with the same [`Snapshot`] struct and the same required fields.
 ///
 /// `remove` is required so a schema rename surfaces as a parse error rather
-/// than an empty result, but restic marshals an empty Go slice as `null`
+/// than an empty result, but restic marshals the nil remove slice as `null`
 /// when nothing is removed, so `null` is accepted and treated as empty.
 /// The other keys restic emits (`keep`, `reasons`, `host`, ...) are ignored.
 #[derive(Debug, Deserialize)]
@@ -54,6 +56,9 @@ struct ForgetGroup {
     remove: Vec<Snapshot>,
 }
 
+/// Accepts `null` as an empty list but still rejects a missing key: unlike
+/// a plain `Option` field, `deserialize_with` disables serde's implicit
+/// missing-field default (see [`ForgetGroup`]).
 fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
