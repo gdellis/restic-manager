@@ -3,7 +3,7 @@ use restic_manager::secrets::Secrets;
 use std::io::Write;
 use std::sync::Mutex;
 
-/// Serializes tests that mutate `XDG_CONFIG_HOME` so they don't race.
+/// Serializes tests that mutate `RESTIC_MANAGER_CONFIG_DIR` so they don't race.
 static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -327,12 +327,12 @@ jobs:
     let mut config_file = std::fs::File::create(config_dir.join("config.yaml")).unwrap();
     config_file.write_all(config_yaml.as_bytes()).unwrap();
 
-    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
-    std::env::set_var("XDG_CONFIG_HOME", &tmp);
+    let old_dir = std::env::var_os("RESTIC_MANAGER_CONFIG_DIR");
+    std::env::set_var("RESTIC_MANAGER_CONFIG_DIR", &config_dir);
     let result = ResolvedConfig::load();
-    match old_xdg {
-        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    match old_dir {
+        Some(v) => std::env::set_var("RESTIC_MANAGER_CONFIG_DIR", v),
+        None => std::env::remove_var("RESTIC_MANAGER_CONFIG_DIR"),
     }
 
     let err = match result {

@@ -30,6 +30,22 @@ fn join_errors(prefix: &str, errors: Vec<String>) -> String {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        let (config, problems) = Self::load_with_problems()?;
+        if problems.is_empty() {
+            Ok(config)
+        } else {
+            Err(ConfigError::Invalid(join_errors("Configuration", problems)))
+        }
+    }
+
+    /// Loads the config file, returning any validation problems alongside
+    /// it rather than failing on the first one.
+    ///
+    /// The TUI uses this so a single broken entry does not hide the rest
+    /// of the configuration from the dashboard; the problems are shown in
+    /// the UI instead. [`Config::load`] keeps failing on them, which is
+    /// what the one-shot CLI commands want.
+    pub fn load_with_problems() -> Result<(Self, Vec<String>), ConfigError> {
         let path = Self::path()?;
         if !path.exists() {
             return Err(ConfigError::NotFound(format!(
@@ -39,16 +55,21 @@ impl Config {
         }
         let content = std::fs::read_to_string(&path)?;
         let config: Config = serde_yaml::from_str(&content)?;
-        config.validate()?;
-        Ok(config)
+        let problems = config.problems();
+        Ok((config, problems))
     }
 
     fn path() -> Result<PathBuf, ConfigError> {
         Ok(crate::exclude::config_dir()?.join("config.yaml"))
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
-        let mut all_errors: Vec<String> = Vec::new();
+    /// Collects every validation problem with this config instead of
+    /// stopping at the first one.
+    ///
+    /// Each entry is a self-contained message, suitable for showing in a
+    /// UI as well as for the aggregated error [`Config::load`] builds.
+    pub fn problems(&self) -> Vec<String> {
+        let mut all_errors = Vec::new();
 
         for (repo_name, repo) in &self.repositories {
             if let Err(e) = repo.validate(repo_name) {
@@ -72,14 +93,7 @@ impl Config {
             }
         }
 
-        if all_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(join_errors(
-                "Configuration",
-                all_errors,
-            )))
-        }
+        all_errors
     }
 
     pub fn get_repository(&self, name: &str) -> Option<&Repository> {
@@ -416,6 +430,32 @@ impl ResolvedConfig {
         Ok(resolved)
     }
 
+    /// Loads the config and secrets without failing when an individual
+    /// repository's secret is missing.
+    ///
+    /// The TUI uses this: one broken repository must not hide every other
+    /// job from the dashboard. The returned problem list names the
+    /// repositories whose secrets could not be resolved, so the UI can show
+    /// them; jobs backed by a healthy repository still work.
+    pub fn load_partial() -> Result<(Self, Vec<String>), crate::errors::AppError> {
+        let (config, mut problems) =
+            Config::load_with_problems().map_err(crate::errors::AppError::Config)?;
+        let secrets = Secrets::load_optional()
+            .map_err(crate::errors::AppError::Secrets)?
+            .unwrap_or_default();
+
+        for (repo_name, repo) in &config.repositories {
+            if secrets.get(&repo.password_key).is_none() {
+                problems.push(format!(
+                    "Repository '{}' references missing secret key '{}'",
+                    repo_name, repo.password_key
+                ));
+            }
+        }
+
+        Ok((Self { config, secrets }, problems))
+    }
+
     fn validate_secrets(&self) -> Result<(), crate::errors::AppError> {
         let mut missing: Vec<String> = Vec::new();
 
@@ -627,7 +667,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -641,7 +681,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -659,7 +699,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -676,7 +716,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -695,7 +735,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -714,7 +754,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_ok());
+        assert!(result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -733,7 +773,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_ok());
+        assert!(result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -752,7 +792,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        assert!(result.unwrap().validate().is_err());
+        assert!(!result.unwrap().problems().is_empty());
     }
 
     #[test]
@@ -835,7 +875,7 @@ jobs: {}
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repo path"), "{}", err);
         assert!(err.contains("empty password_key"), "{}", err);
     }
@@ -854,7 +894,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
     }
@@ -883,8 +923,12 @@ jobs:
       keep_last: null
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("no keep rules"), "{}", err);
+        let problems = config.problems();
+        assert!(
+            problems.iter().any(|p| p.contains("no keep rules")),
+            "{:?}",
+            problems
+        );
     }
 
     #[test]
@@ -903,7 +947,7 @@ jobs:
       keep_daily: 7
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.validate().is_ok());
+        assert!(config.problems().is_empty(), "{:?}", config.problems());
     }
 
     #[test]
@@ -997,7 +1041,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
         assert!(err.contains("invalid schedule"), "{}", err);
@@ -1020,7 +1064,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty backup path at index 1"), "{}", err);
         assert!(err.contains("empty backup path at index 2"), "{}", err);
         assert!(!err.contains("empty backup path at index 3"), "{}", err);
@@ -1041,7 +1085,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(
             !err.contains("non-existent repository"),
@@ -1071,7 +1115,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
         assert!(err.contains("Repository 'bad-repo-1'"), "{}", err);
         assert!(err.contains("Repository 'bad-repo-2'"), "{}", err);
         assert!(err.contains("Job 'bad-job-1'"), "{}", err);
@@ -1099,7 +1143,7 @@ jobs:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_ok());
-        let err = result.unwrap().validate().unwrap_err().to_string();
+        let err = result.unwrap().problems().join("\n");
 
         let repo_a = err.find("Repository 'a-repo'").expect("a-repo error");
         let repo_z = err.find("Repository 'z-repo'").expect("z-repo error");
