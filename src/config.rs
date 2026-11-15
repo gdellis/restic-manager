@@ -46,14 +46,22 @@ impl Config {
     /// the UI instead. [`Config::load`] keeps failing on them, which is
     /// what the one-shot CLI commands want.
     pub fn load_with_problems() -> Result<(Self, Vec<String>), ConfigError> {
-        let path = Self::path()?;
+        Self::load_with_problems_from(&Self::path()?)
+    }
+
+    /// Load config from a specific file path. Used by [`Config::load_with_problems`]
+    /// and by tests that need to verify error messages without relying on the
+    /// process-global `RESTIC_MANAGER_CONFIG_DIR` variable.
+    pub(crate) fn load_with_problems_from(
+        path: &PathBuf,
+    ) -> Result<(Self, Vec<String>), ConfigError> {
         if !path.exists() {
             return Err(ConfigError::NotFound(format!(
                 "Config file not found at {}",
                 path.display()
             )));
         }
-        let content = std::fs::read_to_string(&path).map_err(|e| ConfigError::IoError {
+        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::IoError {
             path: path.clone(),
             source: e,
         })?;
