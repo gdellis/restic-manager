@@ -531,7 +531,7 @@ impl Scheduler {
             ) {
                 Ok(manager) => Some(manager),
                 Err(e) => {
-                    warn!(
+                    error!(
                         job = %name,
                         error = %e,
                         "Failed to build notification client; notifications disabled for this job"

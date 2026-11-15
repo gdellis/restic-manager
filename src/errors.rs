@@ -177,6 +177,48 @@ mod tests {
         assert!(msg.contains("/some/secrets.yaml"), "{}", msg);
     }
 
+    /// M8: a real load failure must surface the file path, not just the
+    /// inner serde_yaml/IO message. Uses `RESTIC_MANAGER_CONFIG_DIR` so it
+    /// does not touch the user's real config dir.
+    #[test]
+    fn test_config_load_bad_yaml_error_includes_path() {
+        use std::env;
+
+        let key = "RESTIC_MANAGER_CONFIG_DIR";
+        let previous = env::var_os(key);
+        let dir = std::env::temp_dir().join(format!(
+            "restic-manager-test-config-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.yaml");
+        std::fs::write(&cfg, "not: valid: yaml: [").unwrap();
+        env::set_var(key, &dir);
+
+        let err = crate::config::Config::load().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(cfg.to_str().unwrap()),
+            "expected path in error, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("parse"),
+            "expected parse failure, got: {}",
+            msg
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        match previous {
+            Some(p) => env::set_var(key, p),
+            None => env::remove_var(key),
+        }
+    }
+
     #[test]
     fn test_from_io_not_found_becomes_not_found_variant() {
         let err = Error::new(ErrorKind::NotFound, "No such file or directory");

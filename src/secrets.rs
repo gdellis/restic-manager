@@ -66,9 +66,11 @@ impl Secrets {
     }
 
     fn path() -> Result<PathBuf, SecretsError> {
-        let dir = crate::exclude::config_dir().map_err(|e| SecretsError::IoError {
-            path: PathBuf::new(),
-            source: e,
+        let dir = crate::exclude::config_dir().map_err(|e| {
+            SecretsError::NotFound(format!(
+                "Cannot locate restic-manager config directory: {}",
+                e
+            ))
         })?;
         Ok(dir.join("secrets.yaml"))
     }

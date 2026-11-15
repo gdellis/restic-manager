@@ -57,7 +57,9 @@ pub fn exclude_file_path() -> Result<PathBuf, std::io::Error> {
 ///
 /// `0700` matches the permission warning in `secrets.rs`: the directory
 /// holds `secrets.yaml` (plaintext passwords) and should not be readable
-/// or writable by group or others.
+/// or writable by group or others. If the directory already existed with
+/// looser permissions, it is chmod'd to 0700; this is intentional — the
+/// directory is reserved for restic-manager secrets.
 fn create_dir_all_secure(dir: &std::path::Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -243,7 +245,13 @@ mod tests {
         let result = config_dir();
         assert!(result.is_ok());
         let path = result.unwrap();
-        assert!(path.to_str().unwrap().ends_with("restic-manager"));
+        let suffix = std::path::MAIN_SEPARATOR_STR.to_string() + "restic-manager";
+        assert!(
+            path.to_str().unwrap().ends_with(&suffix),
+            "expected path to end with '{}', got {:?}",
+            suffix,
+            path
+        );
     }
 
     /// A fresh scratch directory per test, removed on drop (including when
