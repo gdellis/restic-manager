@@ -209,12 +209,13 @@ impl RetentionPolicy {
         Ok(())
     }
 
-    /// The default policy applied when a job's `retention:` block is
-    /// present but no keep rules are specified.
+    /// Returns the pre-M20 default policy values.
     ///
-    /// This is intentionally separate from the serde defaults on the struct
-    /// fields so that a partially-specified policy does not silently gain
-    /// `keep_last: 3`.
+    /// This is a test/helper convenience only: it produces the old
+    /// `keep_last: 3 / keep_daily: 7 / keep_weekly: 4 / keep_monthly: 6`
+    /// defaults that `RetentionPolicy::default()` used to carry. Production
+    /// code does not use this; an empty `retention:` block is rejected by
+    /// `RetentionPolicy::validate` rather than filled in with defaults.
     pub fn default_for_any_unset() -> Self {
         Self {
             keep_daily: Some(7),
@@ -1038,8 +1039,8 @@ jobs:
         assert!(policy.has_rules());
     }
 
-    /// When nothing is specified at all, the policy is empty and should
-    /// be rejected (handled by test_retention_policy_with_no_keep_rules_is_rejected).
+    /// When nothing is specified at all, the policy is empty and is
+    /// rejected by the config validator (just like an all-null policy).
     #[test]
     fn test_retention_unset_block_has_no_rules() {
         let yaml = r#"
@@ -1057,6 +1058,14 @@ jobs:
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let policy = config.get_job("empty").unwrap().retention.as_ref().unwrap();
         assert!(!policy.has_rules());
+        assert!(
+            config
+                .problems()
+                .iter()
+                .any(|p| p.contains("no keep rules")),
+            "empty retention block must be rejected: {:?}",
+            config.problems()
+        );
     }
 
     #[test]
