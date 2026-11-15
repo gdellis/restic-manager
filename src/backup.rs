@@ -155,6 +155,12 @@ impl Backup {
     ) -> Result<BackupResult, AppError> {
         let (job, repo, password) = config.resolve_job(job_name)?;
 
+        // Resolved before the pre-backup hooks so a misconfigured exclude
+        // file fails the job before any hook (e.g. a database dump) has
+        // run.
+        let exclude_file =
+            exclude::resolve_exclude_file(job, job_name)?.map(|p| p.to_string_lossy().to_string());
+
         if !dry_run {
             Self::execute_hooks(&job.pre_backup, "pre-backup")?;
         } else {
@@ -163,9 +169,6 @@ impl Backup {
                 "Dry-run: no data will be written, skipping pre-backup hooks"
             );
         }
-
-        let exclude_file =
-            exclude::resolve_exclude_file(job, job_name).map(|p| p.to_string_lossy().to_string());
 
         let log_file = repo.log_cli_output.as_deref();
 
