@@ -33,8 +33,15 @@ impl Secrets {
             )));
         }
         Self::warn_if_insecure_permissions(&path);
-        let content = std::fs::read_to_string(&path)?;
-        let secrets: Secrets = serde_yaml::from_str(&content)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| SecretsError::IoError {
+            path: path.clone(),
+            source: e,
+        })?;
+        let secrets: Secrets =
+            serde_yaml::from_str(&content).map_err(|e| SecretsError::ParseError {
+                path: path.clone(),
+                source: e,
+            })?;
         secrets.warn_if_telegram_incomplete();
         Ok(secrets)
     }
@@ -45,14 +52,27 @@ impl Secrets {
             return Ok(None);
         }
         Self::warn_if_insecure_permissions(&path);
-        let content = std::fs::read_to_string(&path)?;
-        let secrets: Secrets = serde_yaml::from_str(&content)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| SecretsError::IoError {
+            path: path.clone(),
+            source: e,
+        })?;
+        let secrets: Secrets =
+            serde_yaml::from_str(&content).map_err(|e| SecretsError::ParseError {
+                path: path.clone(),
+                source: e,
+            })?;
         secrets.warn_if_telegram_incomplete();
         Ok(Some(secrets))
     }
 
     fn path() -> Result<PathBuf, SecretsError> {
-        Ok(crate::exclude::config_dir()?.join("secrets.yaml"))
+        let dir = crate::exclude::config_dir().map_err(|e| {
+            SecretsError::NotFound(format!(
+                "Cannot locate restic-manager config directory: {}",
+                e
+            ))
+        })?;
+        Ok(dir.join("secrets.yaml"))
     }
 
     /// A Unix permission `mode` (as returned by `PermissionsExt::mode()`) is
