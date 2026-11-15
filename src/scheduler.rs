@@ -523,8 +523,22 @@ impl Scheduler {
 
         info!(job = %name, "Starting scheduled backup");
 
-        let notifier = job.as_ref().map(|j| {
-            NotificationManager::with_rate_limiter(&config, j.notifications.clone(), rate_limiter)
+        let notifier = job.as_ref().and_then(|j| {
+            match NotificationManager::with_rate_limiter(
+                &config,
+                j.notifications.clone(),
+                rate_limiter,
+            ) {
+                Ok(manager) => Some(manager),
+                Err(e) => {
+                    warn!(
+                        job = %name,
+                        error = %e,
+                        "Failed to build notification client; notifications disabled for this job"
+                    );
+                    None
+                }
+            }
         });
 
         let blocking_config = Arc::clone(&config);

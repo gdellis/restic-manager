@@ -53,14 +53,25 @@ impl Config {
                 path.display()
             )));
         }
-        let content = std::fs::read_to_string(&path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| ConfigError::IoError {
+            path: path.clone(),
+            source: e,
+        })?;
+        let config: Config =
+            serde_yaml::from_str(&content).map_err(|e| ConfigError::ParseError {
+                path: path.clone(),
+                source: e,
+            })?;
         let problems = config.problems();
         Ok((config, problems))
     }
 
     fn path() -> Result<PathBuf, ConfigError> {
-        Ok(crate::exclude::config_dir()?.join("config.yaml"))
+        let dir = crate::exclude::config_dir().map_err(|e| ConfigError::IoError {
+            path: PathBuf::new(),
+            source: e,
+        })?;
+        Ok(dir.join("config.yaml"))
     }
 
     /// Collects every validation problem with this config instead of

@@ -71,29 +71,34 @@ impl Notifications {
     /// Build a `Notifications` from the resolved config, pulling bot
     /// credentials from `Secrets`. Safe to call when no Telegram section
     /// is configured - `send_*` will then silently no-op.
-    pub fn new(config: &ResolvedConfig) -> Self {
+    ///
+    /// Returns an error if the reqwest client builder fails (e.g. TLS
+    /// init or proxy setup), so a transport timeout is never silently
+    /// dropped. Previously the builder's `unwrap_or_else(Client::new)`
+    /// fallback lost the 10-second timeout.
+    pub fn new(config: &ResolvedConfig) -> Result<Self, NotificationError> {
         let telegram = config.secrets.telegram_config();
 
-        Self {
+        Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_else(|_| Client::new()),
+                .map_err(NotificationError::RequestFailed)?,
             bot_token: telegram.and_then(|t| t.bot_token.clone()),
             chat_id: telegram.and_then(|t| t.chat_id.clone()),
             api_base: TELEGRAM_API_BASE.to_string(),
             rate_limiter: std::sync::Arc::new(Mutex::new(RateLimiter::default())),
-        }
+        })
     }
 
     /// Test-only constructor pointing the sender at a different API
     /// base URL, so a transport failure can be provoked without
     /// contacting the real Telegram API.
     #[cfg(test)]
-    fn with_api_base(config: &ResolvedConfig, api_base: &str) -> Self {
-        let mut notifications = Self::new(config);
+    fn with_api_base(config: &ResolvedConfig, api_base: &str) -> Result<Self, NotificationError> {
+        let mut notifications = Self::new(config)?;
         notifications.api_base = api_base.to_string();
-        notifications
+        Ok(notifications)
     }
 
     /// Construct a `Notifications` that shares the supplied rate limiter
@@ -103,10 +108,10 @@ impl Notifications {
     pub fn with_rate_limiter(
         config: &ResolvedConfig,
         rate_limiter: std::sync::Arc<Mutex<RateLimiter>>,
-    ) -> Self {
-        let mut notifications = Self::new(config);
+    ) -> Result<Self, NotificationError> {
+        let mut notifications = Self::new(config)?;
         notifications.rate_limiter = rate_limiter;
-        notifications
+        Ok(notifications)
     }
 
     /// Returns true if both a bot token and chat id were resolved from
@@ -297,11 +302,14 @@ pub struct NotificationManager {
 impl NotificationManager {
     /// Build a manager that uses `job_config`'s on_failure/on_success
     /// toggles to decide whether each `notify_*` call actually sends.
-    pub fn new(config: &ResolvedConfig, job_config: NotificationConfig) -> Self {
-        Self {
-            notifications: Notifications::new(config),
+    pub fn new(
+        config: &ResolvedConfig,
+        job_config: NotificationConfig,
+    ) -> Result<Self, NotificationError> {
+        Ok(Self {
+            notifications: Notifications::new(config)?,
             job_config,
-        }
+        })
     }
 
     /// Build a manager that shares the supplied rate limiter with other
@@ -310,11 +318,11 @@ impl NotificationManager {
         config: &ResolvedConfig,
         job_config: NotificationConfig,
         rate_limiter: std::sync::Arc<Mutex<RateLimiter>>,
-    ) -> Self {
-        Self {
-            notifications: Notifications::with_rate_limiter(config, rate_limiter),
+    ) -> Result<Self, NotificationError> {
+        Ok(Self {
+            notifications: Notifications::with_rate_limiter(config, rate_limiter)?,
             job_config,
-        }
+        })
     }
 
     /// Send a failure notification if the job's `on_failure` toggle is on.
@@ -438,14 +446,14 @@ mod tests {
     #[test]
     fn test_not_configured() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_configured());
     }
 
     #[tokio::test]
     async fn test_send_failure_not_configured() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         let result = notifications.send_failure("test-job", "test error").await;
         assert!(result.is_ok());
     }
@@ -453,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_success_not_configured() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         let result = notifications
             .send_success("test-job", Some("snap123"))
             .await;
@@ -467,7 +475,7 @@ mod tests {
             on_failure: false,
             on_success: false,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager.notify_failure("test-job", "error").await;
         assert!(result.is_ok());
     }
@@ -479,7 +487,7 @@ mod tests {
             on_failure: false,
             on_success: false,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager.notify_success("test-job", Some("snap123")).await;
         assert!(result.is_ok());
     }
@@ -491,7 +499,7 @@ mod tests {
             on_failure: true,
             on_success: false,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager.notify_failure("test-job", "error").await;
         assert!(result.is_ok());
     }
@@ -503,7 +511,7 @@ mod tests {
             on_failure: false,
             on_success: true,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager.notify_success("test-job", Some("snap123")).await;
         assert!(result.is_ok());
     }
@@ -528,7 +536,7 @@ mod tests {
         };
 
         let handle = tokio::spawn(async move {
-            let notifications = Notifications::new(&config);
+            let notifications = Notifications::new(&config).unwrap();
             // The fake token means the actual HTTP call will fail or be
             // rejected; we only care that awaiting it from inside this
             // spawned task completes without panicking, not what the
@@ -562,7 +570,7 @@ mod tests {
 
         // Port 1 on loopback refuses connections, so the request fails
         // locally without any network egress.
-        let notifications = Notifications::with_api_base(&config, "http://127.0.0.1:1");
+        let notifications = Notifications::with_api_base(&config, "http://127.0.0.1:1").unwrap();
         let err = notifications
             .send_failure("test-job", "boom")
             .await
@@ -606,7 +614,7 @@ mod tests {
                 chat_id: Some("123".to_string()),
             }),
         };
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_configured());
     }
 
@@ -621,7 +629,7 @@ mod tests {
                 chat_id: None,
             }),
         };
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_configured());
     }
 
@@ -636,7 +644,7 @@ mod tests {
                 chat_id: None,
             }),
         };
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_configured());
     }
 
@@ -651,7 +659,7 @@ mod tests {
                 chat_id: Some("chat123".to_string()),
             }),
         };
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(notifications.is_configured());
     }
 
@@ -663,7 +671,7 @@ mod tests {
         // sent anything - so a failed send would silently poison the
         // window for every real failure afterward.
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_rate_limited("test-job", true));
         assert!(
             !notifications.is_rate_limited("test-job", true),
@@ -674,7 +682,7 @@ mod tests {
     #[test]
     fn test_record_notification_sent_then_rate_limited() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         assert!(!notifications.is_rate_limited("test-job", true));
         notifications.record_notification_sent("test-job", true);
         assert!(notifications.is_rate_limited("test-job", true));
@@ -683,7 +691,7 @@ mod tests {
     #[test]
     fn test_rate_limit_is_keyed_per_job() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         notifications.record_notification_sent("job-a", true);
         assert!(notifications.is_rate_limited("job-a", true));
         assert!(!notifications.is_rate_limited("job-b", true));
@@ -693,8 +701,8 @@ mod tests {
     fn test_rate_limit_shared_across_instances() {
         let config = test_config();
         let shared = std::sync::Arc::new(Mutex::new(RateLimiter::default()));
-        let a = Notifications::with_rate_limiter(&config, std::sync::Arc::clone(&shared));
-        let b = Notifications::with_rate_limiter(&config, shared);
+        let a = Notifications::with_rate_limiter(&config, std::sync::Arc::clone(&shared)).unwrap();
+        let b = Notifications::with_rate_limiter(&config, shared).unwrap();
         a.record_notification_sent("job", true);
         assert!(b.is_rate_limited("job", true));
     }
@@ -702,7 +710,7 @@ mod tests {
     #[test]
     fn test_rate_limiter_poison_does_not_panic() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         // Poison the inner mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _g = notifications.rate_limiter.lock().unwrap();
@@ -717,7 +725,7 @@ mod tests {
     #[test]
     fn test_failure_and_success_rate_limits_are_independent() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         notifications.record_notification_sent("test-job", true);
         assert!(notifications.is_rate_limited("test-job", true));
         assert!(!notifications.is_rate_limited("test-job", false));
@@ -726,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_partial_not_configured() {
         let config = test_config();
-        let notifications = Notifications::new(&config);
+        let notifications = Notifications::new(&config).unwrap();
         let result = notifications
             .send_partial("test-job", Some("snap123"), "3 files unreadable")
             .await;
@@ -740,7 +748,7 @@ mod tests {
             on_failure: false,
             on_success: false,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager
             .notify_partial("test-job", Some("snap123"), "err")
             .await;
@@ -754,7 +762,7 @@ mod tests {
             on_failure: true,
             on_success: false,
         };
-        let manager = NotificationManager::new(&config, job_config);
+        let manager = NotificationManager::new(&config, job_config).unwrap();
         let result = manager
             .notify_partial("test-job", Some("snap123"), "err")
             .await;
