@@ -260,7 +260,7 @@ mod tests {
                 exclude_file: None,
                 exclude_patterns: None,
                 schedule: None,
-                retention: Some(RetentionPolicy::default()),
+                retention: Some(RetentionPolicy::default_for_any_unset()),
                 notifications: Default::default(),
                 pre_backup: vec![],
                 post_backup: vec![],
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn test_retention_args() {
         let mut args = vec![];
-        let retention = RetentionPolicy::default();
+        let retention = RetentionPolicy::default_for_any_unset();
         SnapshotManager::apply_retention_args(&mut args, &retention);
         assert!(args.contains(&"--keep-daily".to_string()));
         assert!(args.contains(&"7".to_string()));
@@ -306,6 +306,21 @@ mod tests {
         };
         SnapshotManager::apply_retention_args(&mut args, &retention);
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_retention_args_partially_specified_does_not_gain_defaults() {
+        // M20: a policy that names only keep_daily must NOT silently gain
+        // keep_last: 3 or any other defaulted rule.
+        let mut args = vec![];
+        let retention = RetentionPolicy {
+            keep_daily: Some(7),
+            ..Default::default()
+        };
+        SnapshotManager::apply_retention_args(&mut args, &retention);
+        assert!(args.contains(&"--keep-daily".to_string()));
+        assert!(!args.contains(&"--keep-weekly".to_string()));
+        assert!(!args.contains(&"--keep-last".to_string()));
     }
 
     #[test]
@@ -554,7 +569,7 @@ mod tests {
                 exclude_file: None,
                 exclude_patterns: None,
                 schedule: None,
-                retention: Some(RetentionPolicy::default()),
+                retention: Some(RetentionPolicy::default_for_any_unset()),
                 notifications: Default::default(),
                 pre_backup: vec![],
                 post_backup: vec![],

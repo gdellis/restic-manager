@@ -239,7 +239,7 @@ comments in the unit files.
 | `jobs.<name>.exclude_patterns` | List of exclude patterns, written to `excludes.d/<name>.txt` in the config dir |
 | `jobs.<name>.exclude_file` | Exclude file path; wins over `exclude_patterns`; must exist (see below) |
 | `jobs.<name>.schedule` | Cron expression for scheduling |
-| `jobs.<name>.retention` | `keep_daily`/`keep_weekly`/`keep_monthly`/`keep_yearly`/`keep_hourly`/`keep_last` |
+| `jobs.<name>.retention` | Keep rules. Only the rules you list are applied (`keep_*`) |
 | `jobs.<name>.notifications` | `on_failure`/`on_success` |
 | `jobs.<name>.pre_backup` | Hooks to run before backup (skipped in `--dry-run`) |
 | `jobs.<name>.post_backup` | Hooks to run after backup (skipped in `--dry-run`) |

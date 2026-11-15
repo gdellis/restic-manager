@@ -157,7 +157,13 @@ impl Repository {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Job-level retention policy for `restic forget`.
+///
+/// All keep rules are optional. The serde defaults are all `None`, so a
+/// partially-specified policy only contains the rules the user explicitly
+/// asked for. A policy with no rules at all is rejected at validation
+/// time rather than silently doing nothing during a backup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionPolicy {
     #[serde(default)]
@@ -170,35 +176,17 @@ pub struct RetentionPolicy {
     pub keep_yearly: Option<u32>,
     #[serde(default)]
     pub keep_hourly: Option<u32>,
-    #[serde(default = "default_keep_last")]
+    #[serde(default)]
     pub keep_last: Option<u32>,
-}
-
-fn default_keep_last() -> Option<u32> {
-    Some(3)
-}
-
-impl Default for RetentionPolicy {
-    fn default() -> Self {
-        Self {
-            keep_daily: Some(7),
-            keep_weekly: Some(4),
-            keep_monthly: Some(6),
-            keep_yearly: None,
-            keep_hourly: None,
-            keep_last: Some(3),
-        }
-    }
 }
 
 impl RetentionPolicy {
     /// True if at least one keep rule is set.
     ///
     /// A policy with no rules produces a `restic forget` invocation with no
-    /// `--keep-*` flags, which removes nothing - a silent no-op that looks
-    /// like it ran. `keep_last` defaults to `Some(3)` when the key is absent,
-    /// but an explicit `keep_last: null` clears it, so a policy can end up
-    /// with no rules at all.
+    /// `--keep-*` flags, which removes nothing — a silent no-op that looks
+    /// like it ran. Every rule defaults to `None`, so a missing or
+    /// explicitly-nulled policy can end up with no rules at all.
     pub fn has_rules(&self) -> bool {
         self.keep_daily.is_some()
             || self.keep_weekly.is_some()
@@ -219,6 +207,24 @@ impl RetentionPolicy {
             )));
         }
         Ok(())
+    }
+
+    /// Returns the pre-M20 default policy values.
+    ///
+    /// This is a test/helper convenience only: it produces the old
+    /// `keep_last: 3 / keep_daily: 7 / keep_weekly: 4 / keep_monthly: 6`
+    /// defaults that `RetentionPolicy::default()` used to carry. Production
+    /// code does not use this; an empty `retention:` block is rejected by
+    /// `RetentionPolicy::validate` rather than filled in with defaults.
+    pub fn default_for_any_unset() -> Self {
+        Self {
+            keep_daily: Some(7),
+            keep_weekly: Some(4),
+            keep_monthly: Some(6),
+            keep_yearly: None,
+            keep_hourly: None,
+            keep_last: Some(3),
+        }
     }
 }
 
@@ -1001,17 +1007,19 @@ jobs:
         assert!(config.problems().is_empty(), "{:?}", config.problems());
     }
 
+    /// M20: a partially-specified retention policy must only contain the
+    /// rules the user explicitly wrote. The old code gave `keep_last` a
+    /// serde default of 3, so `keep_daily: 7` silently also kept the last
+    /// 3 snapshots.
     #[test]
-    fn test_retention_absent_keep_last_defaults_to_three() {
-        // keep_last has a serde default, so a policy that names only
-        // keep_daily still keeps the last 3 snapshots as well.
+    fn test_retention_partially_specified_does_not_gain_defaults() {
         let yaml = r#"
 repositories:
   test:
     repo: /tmp/repo
     password_key: pass
 jobs:
-  good:
+  daily-only:
     repository: test
     paths:
     - /tmp/data
@@ -1019,9 +1027,45 @@ jobs:
       keep_daily: 7
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let policy = config.get_job("good").unwrap().retention.as_ref().unwrap();
-        assert_eq!(policy.keep_last, Some(3));
+        let policy = config
+            .get_job("daily-only")
+            .unwrap()
+            .retention
+            .as_ref()
+            .unwrap();
+        assert_eq!(policy.keep_daily, Some(7));
+        assert_eq!(policy.keep_last, None);
+        assert_eq!(policy.keep_weekly, None);
         assert!(policy.has_rules());
+    }
+
+    /// When nothing is specified at all, the policy is empty and is
+    /// rejected by the config validator (just like an all-null policy).
+    #[test]
+    fn test_retention_unset_block_has_no_rules() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  empty:
+    repository: test
+    paths:
+    - /tmp/data
+    retention: {}
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let policy = config.get_job("empty").unwrap().retention.as_ref().unwrap();
+        assert!(!policy.has_rules());
+        assert!(
+            config
+                .problems()
+                .iter()
+                .any(|p| p.contains("no keep rules")),
+            "empty retention block must be rejected: {:?}",
+            config.problems()
+        );
     }
 
     #[test]
