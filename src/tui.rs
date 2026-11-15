@@ -890,8 +890,9 @@ fn render_help(f: &mut ratatui::Frame) {
     let help_text = "\
 Keybindings:\n\
 \n\
-↑/↓ or j/k — select sidebar item\n\
-n / k — move selection inside the current list (j also down)\n\
+↑/↓ — select sidebar item\n\
+j / n — move selection down in the current list\n\
+k — move selection up in the current list\n\
 Enter — select highlighted job/repository\n\
 r — run selected job\n\
 R — restore (full overlay coming soon)\n\

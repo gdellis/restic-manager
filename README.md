@@ -152,8 +152,9 @@ restic-manager tui
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` or `j` / `k` | Select sidebar item |
-| `n` / `k` | Move selection inside the current list (`j` also moves down) |
+| `↑` / `↓` | Select sidebar item |
+| `j` / `n` | Move selection down in the current list |
+| `k` | Move selection up in the current list |
 | `Enter` | Select highlighted job/repository and load details |
 | `r` | Run selected job |
 | `R` | Restore (full overlay coming in a future release) |
