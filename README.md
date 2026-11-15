@@ -233,16 +233,21 @@ comments in the unit files.
 | --- | --- |
 | `repositories.<name>.repo` | Restic repository path |
 | `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
+| `jobs.<name>` | Job name; also a file name under `excludes.d/`: no `/`, `\` or `:`, and not `.` or `..` |
 | `jobs.<name>.repository` | Repository name to use |
 | `jobs.<name>.paths` | List of paths to backup |
-| `jobs.<name>.exclude_patterns` | List of exclude patterns, written to a per-job exclude file |
-| `jobs.<name>.exclude_file` | Path to an existing exclude file; takes precedence over `exclude_patterns` |
+| `jobs.<name>.exclude_patterns` | List of exclude patterns, written to `excludes.d/<name>.txt` in the config dir |
+| `jobs.<name>.exclude_file` | Exclude file path; wins over `exclude_patterns`; must exist (see below) |
 | `jobs.<name>.schedule` | Cron expression for scheduling |
 | `jobs.<name>.retention` | `keep_daily`/`keep_weekly`/`keep_monthly`/`keep_yearly`/`keep_hourly`/`keep_last` |
 | `jobs.<name>.notifications` | `on_failure`/`on_success` |
 | `jobs.<name>.pre_backup` | Hooks to run before backup (skipped in `--dry-run`) |
 | `jobs.<name>.post_backup` | Hooks to run after backup (skipped in `--dry-run`) |
 |   ↳ hook `continue_on_error` | If `true`, a failed hook warns instead of aborting the backup |
+
+A configured `exclude_file` is checked after the pre-backup hooks run (so a hook may generate
+it); if it is missing the job fails rather than silently backing up with the default excludes.
+`--dry-run` skips hooks, so a hook-generated file must already exist for a dry run.
 
 ### secrets.yaml
 

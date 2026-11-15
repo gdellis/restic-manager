@@ -288,6 +288,11 @@ impl Job {
     fn validate(&self, name: &str) -> Result<(), ConfigError> {
         let mut errors: Vec<String> = Vec::new();
 
+        // The job name becomes a file name under excludes.d/ when the job
+        // has exclude_patterns, so it must be a plain path component.
+        if let Err(msg) = crate::exclude::validate_job_file_name(name) {
+            errors.push(msg);
+        }
         if self.repository.trim().is_empty() {
             errors.push("empty repository reference".to_string());
         }
@@ -897,6 +902,52 @@ jobs:
         let err = result.unwrap().problems().join("\n");
         assert!(err.contains("empty repository reference"), "{}", err);
         assert!(err.contains("no backup paths"), "{}", err);
+    }
+
+    #[test]
+    fn test_job_name_with_path_traversal_is_rejected() {
+        // H13: the job name becomes a file name under excludes.d/, so a
+        // name with traversal segments or separators must fail validation
+        // instead of writing outside the config directory at backup time.
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  "../../escaped":
+    repository: test
+    paths:
+    - /tmp/data
+  "nested/name":
+    repository: test
+    paths:
+    - /tmp/data
+  fine-name:
+    repository: test
+    paths:
+    - /tmp/data
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let problems = config.problems();
+        assert_eq!(problems.len(), 2, "{:?}", problems);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("../../escaped") && p.contains("excludes.d/")),
+            "{:?}",
+            problems
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("nested/name")),
+            "{:?}",
+            problems
+        );
+        assert!(
+            !problems.iter().any(|p| p.contains("fine-name")),
+            "{:?}",
+            problems
+        );
     }
 
     #[test]

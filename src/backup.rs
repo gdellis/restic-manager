@@ -164,8 +164,10 @@ impl Backup {
             );
         }
 
+        // Resolved after the pre-backup hooks on purpose: a hook may
+        // generate the configured exclude_file.
         let exclude_file =
-            exclude::resolve_exclude_file(job, job_name).map(|p| p.to_string_lossy().to_string());
+            exclude::resolve_exclude_file(job, job_name)?.map(|p| p.to_string_lossy().to_string());
 
         let log_file = repo.log_cli_output.as_deref();
 
