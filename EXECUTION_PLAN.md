@@ -9,7 +9,9 @@ docs reconcile having landed (done). Merging must wait for explicit maintainer a
    Blocks trust in every later doc change.
 - (2) PR #109 - review/audit-2026-10: land the review report and its implementation plan as
    reference material. Docs only, low risk.
-- (3) PR #113 - chore/todo-markdown-line-length: cosmetic TODO reflow.
+
+PR #113 (chore/todo-markdown-line-length) was closed as superseded: PR #117 rewrote TODO.md
+within the 120-char lint limit, leaving nothing to reflow.
 
 ## Phase 1 - Correctness and secrets (Waves 1-2)
 
