@@ -35,7 +35,7 @@ what is verified, and what is next. Update it when you finish a phase.
 
 | PR | What | Status |
 |---|---|---|
-| #137 | Arc<ResolvedConfig> + concurrency semaphore (M5/M6) | implemented, CI green on branch; review agent not yet run — earlier attempt was a phantom session, never actually ran |
+| #137 | Arc<ResolvedConfig> + concurrency semaphore (M5/M6) | implemented, CI green on branch; review agent still pending (prior attempt was a phantom) |
 
 **Earlier this session (pre-pipeline, also merged):**
 
