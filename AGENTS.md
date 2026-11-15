@@ -67,6 +67,10 @@ here.
 Use `./.omo/session-work/` for temporary clones, downloaded references, logs, and agent
 scratch files. Keep durable QA evidence under `./.omo/evidence/` when needed.
 
+The mid-stream handoff note (where the work stands, open PRs, next steps) lives at
+`./.omo/HANDOFF.md`. It is local session state, not repo documentation: read it first when
+taking over, update it when you finish a phase, and never commit it.
+
 ## Repo quirks
 
 - **`Cargo.lock` is gitignored** (line 2 of `.gitignore`). Deps float; CI resolves fresh.
