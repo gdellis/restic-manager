@@ -934,7 +934,7 @@ jobs:
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("../../escaped") && p.contains("path separators")),
+                .any(|p| p.contains("../../escaped") && p.contains("excludes.d/")),
             "{:?}",
             problems
         );

@@ -53,10 +53,6 @@ pub fn exclude_file_path() -> Result<PathBuf, std::io::Error> {
     Ok(config_dir()?.join("excludes.txt"))
 }
 
-pub fn exclude_d_dir() -> Result<PathBuf, std::io::Error> {
-    Ok(config_dir()?.join("excludes.d"))
-}
-
 pub fn ensure_default_exclude_file() -> Result<PathBuf, std::io::Error> {
     let path = exclude_file_path()?;
     if !path.exists() {
@@ -73,34 +69,44 @@ pub fn ensure_default_exclude_file() -> Result<PathBuf, std::io::Error> {
 ///
 /// The job name comes from the config file, and `Path::join` does not
 /// sanitise it: a job called `../../escaped` would write its
-/// `exclude_patterns` outside the config directory. Rejecting anything
-/// that is not a single plain path component closes that hole on every
-/// platform (on Windows this also rejects drive prefixes like `C:name`).
+/// `exclude_patterns` outside the config directory. The rules are the
+/// same on every platform so a config validates identically across the
+/// build matrix: `\` and `:` are rejected even on Unix, where they are
+/// legal in file names, because on Windows they are a separator and a
+/// drive prefix (`C:name` joined onto a directory *replaces* it).
 pub fn validate_job_file_name(job_name: &str) -> Result<(), String> {
     if job_name.trim().is_empty() {
         return Err("job name is empty".to_string());
     }
     if job_name == "." || job_name == ".." {
-        return Err(format!("job name '{}' is not a valid file name", job_name));
-    }
-    if job_name.contains(['/', '\\', '\0']) {
         return Err(format!(
-            "job name '{}' must not contain path separators",
+            "job name {:?} is not usable as a file name under excludes.d/",
             job_name
         ));
     }
+    if job_name.contains('\0') {
+        return Err(format!(
+            "job name {:?} must not contain a NUL byte",
+            job_name
+        ));
+    }
+    if job_name.contains(['/', '\\', ':']) {
+        return Err(format!(
+            "job name {:?} is used as a file name under excludes.d/ and must not contain \
+             '/', '\\' or ':'",
+            job_name
+        ));
+    }
+    // Backstop for any platform-specific prefix the character filter
+    // above does not know about.
     let mut components = Path::new(job_name).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(_)), None) => Ok(()),
         _ => Err(format!(
-            "job name '{}' is not a single plain file name component",
+            "job name {:?} is not a plain file name (it contains a path prefix or separator)",
             job_name
         )),
     }
-}
-
-pub fn write_job_excludes(job_name: &str, patterns: &[String]) -> Result<PathBuf, std::io::Error> {
-    write_job_excludes_in(&exclude_d_dir()?, job_name, patterns)
 }
 
 fn write_job_excludes_in(
@@ -184,21 +190,41 @@ mod tests {
         assert!(path.to_str().unwrap().ends_with("restic-manager"));
     }
 
-    /// A fresh scratch directory per test, so tests never share state or
-    /// touch the real config directory (and never need the process-global
-    /// RESTIC_MANAGER_CONFIG_DIR, which would race between tests).
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "restic-manager-test-exclude-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh scratch directory per test, removed on drop (including when
+    /// an assertion panics), so tests never share state, never touch the
+    /// real config directory, and never need the process-global
+    /// RESTIC_MANAGER_CONFIG_DIR (which would race between tests).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "restic-manager-test-exclude-{}-{}-{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        /// A config directory nested two levels below the scratch root, so a
+        /// `../../escaped` from `<config>/excludes.d/` lands inside the
+        /// scratch root (and is cleaned up) rather than in the shared temp dir.
+        fn config_dir(&self) -> PathBuf {
+            let dir = self.0.join("cfg").join("restic-manager");
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn make_job(
@@ -233,6 +259,9 @@ mod tests {
             "a\\b",
             "/abs",
             "nul\0byte",
+            "C:foo",
+            "C:",
+            "a:b",
         ] {
             assert!(validate_job_file_name(name).is_err(), "{name:?}");
         }
@@ -242,8 +271,8 @@ mod tests {
     /// able to write outside excludes.d/.
     #[test]
     fn test_write_job_excludes_rejects_traversal_job_name() {
-        let root = scratch_dir("traversal");
-        let excludes_d = root.join("config").join("excludes.d");
+        let scratch = Scratch::new("traversal");
+        let excludes_d = scratch.config_dir().join("excludes.d");
 
         let err = write_job_excludes_in(&excludes_d, "../../escaped", &["*.tmp".to_string()])
             .expect_err("traversal job name must be rejected");
@@ -251,16 +280,14 @@ mod tests {
 
         // Nothing was written anywhere: not the escaped path, and not a
         // sanitised one either (the whole job is refused).
-        assert!(!root.join("escaped.txt").exists());
+        assert!(!scratch.0.join("cfg").join("escaped.txt").exists());
         assert!(!excludes_d.exists());
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_write_job_excludes_writes_patterns_for_plain_name() {
-        let root = scratch_dir("plain");
-        let excludes_d = root.join("excludes.d");
+        let scratch = Scratch::new("plain");
+        let excludes_d = scratch.config_dir().join("excludes.d");
 
         let path = write_job_excludes_in(
             &excludes_d,
@@ -274,15 +301,14 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "*.tmp\nnode_modules\n"
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// M1: an explicitly configured exclude_file that is missing must be
     /// an error, not a silent fall-through to patterns or the default.
     #[test]
     fn test_resolve_missing_configured_exclude_file_is_an_error() {
-        let root = scratch_dir("missing");
+        let scratch = Scratch::new("missing");
+        let root = scratch.config_dir();
         // Both fallbacks are available, to prove neither is used.
         std::fs::write(root.join("excludes.txt"), ".cache\n").unwrap();
         let missing = root.join("does-not-exist.txt");
@@ -298,13 +324,12 @@ mod tests {
             !root.join("excludes.d").exists(),
             "patterns must not be written"
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_resolve_configured_exclude_file_wins_when_present() {
-        let root = scratch_dir("present");
+        let scratch = Scratch::new("present");
+        let root = scratch.config_dir();
         let explicit = root.join("mine.txt");
         std::fs::write(&explicit, "*.log\n").unwrap();
         std::fs::write(root.join("excludes.txt"), ".cache\n").unwrap();
@@ -313,39 +338,36 @@ mod tests {
         let resolved = resolve_exclude_file_in(&root, &job, "daily").unwrap();
         assert_eq!(resolved, Some(explicit));
         assert!(!root.join("excludes.d").exists());
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_resolve_patterns_are_written_under_excludes_d() {
-        let root = scratch_dir("patterns");
+        let scratch = Scratch::new("patterns");
+        let root = scratch.config_dir();
         let job = make_job(None, Some(vec!["*.tmp"]));
 
         let resolved = resolve_exclude_file_in(&root, &job, "daily").unwrap();
         assert_eq!(resolved, Some(root.join("excludes.d").join("daily.txt")));
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_resolve_patterns_with_traversal_job_name_is_an_error() {
-        let root = scratch_dir("patterns-traversal");
+        let scratch = Scratch::new("patterns-traversal");
+        let root = scratch.config_dir();
         std::fs::write(root.join("excludes.txt"), ".cache\n").unwrap();
         let job = make_job(None, Some(vec!["*.tmp"]));
 
         let err = resolve_exclude_file_in(&root, &job, "../../escaped")
             .expect_err("must not fall back to the default file");
         assert!(err.to_string().contains("exclude_patterns"), "{err}");
-        assert!(!root.join("escaped.txt").exists());
-        assert!(!root.parent().unwrap().join("escaped.txt").exists());
-
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(!scratch.0.join("cfg").join("escaped.txt").exists());
+        assert!(!root.join("excludes.d").exists());
     }
 
     #[test]
     fn test_resolve_falls_back_to_default_only_when_nothing_configured() {
-        let root = scratch_dir("default");
+        let scratch = Scratch::new("default");
+        let root = scratch.config_dir();
         let job = make_job(None, None);
 
         assert_eq!(resolve_exclude_file_in(&root, &job, "daily").unwrap(), None);
@@ -362,7 +384,5 @@ mod tests {
             resolve_exclude_file_in(&root, &job, "daily").unwrap(),
             Some(root.join("excludes.txt"))
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
