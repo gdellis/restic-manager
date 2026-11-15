@@ -214,12 +214,15 @@ fn daemon_running() -> bool {
             if comm != "restic-manager" {
                 continue;
             }
-            // Check cmdline for "daemon".
-            let cmdline = match fs::read_to_string(path.join("cmdline")) {
-                Ok(s) => s.replace('\0', " "),
+            // Check cmdline for the daemon subcommand: an exact argv match,
+            // not a substring scan. `restic-manager run daemon` (a job named
+            // "daemon") or `restic-manager check daemon` contain the word but
+            // are not the daemon - a substring match false-positives on both.
+            let cmdline = match fs::read(path.join("cmdline")) {
+                Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            if cmdline.contains("daemon") {
+            if cmdline_is_daemon(&cmdline) {
                 return true;
             }
         }
@@ -230,6 +233,20 @@ fn daemon_running() -> bool {
         // Daemon detection not implemented for this platform.
         false
     }
+}
+
+/// Whether a NUL-separated `/proc/<pid>/cmdline` belongs to a manager
+/// daemon process (`restic-manager daemon`).
+///
+/// The FIRST subcommand argument must be exactly `daemon`. argv for
+/// `restic-manager run daemon` (a job named "daemon") is
+/// `[exe, "run", "daemon"]` - the word appears, but not in subcommand
+/// position, so it is not the daemon. A substring scan of the whole
+/// command line would false-positive on it.
+fn cmdline_is_daemon(cmdline: &[u8]) -> bool {
+    let mut argv = cmdline.split(|&byte| byte == 0);
+    let _exe = argv.next();
+    argv.next() == Some(b"daemon".as_slice())
 }
 
 /// Routes `tracing` output into the TUI's log buffer.
@@ -1140,4 +1157,68 @@ fn build_status_text(app: &App) -> String {
     }
 
     "?:help n/k list Enter select r:run R:restore l:list p:prune c:check L:logs q:quit".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cmdline_is_daemon;
+
+    fn cmdline(args: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for arg in args {
+            bytes.extend_from_slice(arg.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn daemon_subcommand_is_detected() {
+        assert!(cmdline_is_daemon(&cmdline(&["restic-manager", "daemon"])));
+        // Invoked through an absolute path, e.g. from a systemd unit.
+        assert!(cmdline_is_daemon(&cmdline(&[
+            "/usr/local/bin/restic-manager",
+            "daemon"
+        ])));
+    }
+
+    #[test]
+    fn job_named_daemon_is_not_the_daemon() {
+        // Regression for H4: the substring scan reported the daemon as
+        // running for any cmdline containing the word "daemon".
+        assert!(!cmdline_is_daemon(&cmdline(&[
+            "restic-manager",
+            "run",
+            "daemon"
+        ])));
+        assert!(!cmdline_is_daemon(&cmdline(&[
+            "restic-manager",
+            "check",
+            "daemon"
+        ])));
+        assert!(!cmdline_is_daemon(&cmdline(&[
+            "restic-manager",
+            "run",
+            "my-daemon-backup"
+        ])));
+    }
+
+    #[test]
+    fn other_commands_are_not_the_daemon() {
+        assert!(!cmdline_is_daemon(&cmdline(&["restic-manager"])));
+        assert!(!cmdline_is_daemon(&cmdline(&["restic-manager", "jobs"])));
+        assert!(!cmdline_is_daemon(&cmdline(&["restic-manager", "tui"])));
+    }
+
+    #[test]
+    fn daemon_with_extra_positional_is_not_matched() {
+        // "daemon --verbose" is not a supported invocation shape, and a
+        // stricter match beats a loose one for detection heuristics... but
+        // an extra *flag* after the subcommand should still count.
+        assert!(cmdline_is_daemon(&cmdline(&[
+            "restic-manager",
+            "daemon",
+            "--log-level=debug"
+        ])));
+    }
 }
