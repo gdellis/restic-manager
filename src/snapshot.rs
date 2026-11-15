@@ -8,9 +8,12 @@ use tracing::{info, warn};
 
 /// A single restic snapshot, parsed from `restic snapshots --json`.
 ///
-/// Field names mirror the JSON keys restic emits so the struct can be
-/// populated by direct indexing into the parsed value (see the snapshot
-/// parser in `SnapshotManager::list`).
+/// Field names mirror the JSON keys restic emits, so the struct is populated
+/// directly by serde in `SnapshotManager::list`. `id` and `time` are required:
+/// if restic renames or retypes them, deserialization fails instead of
+/// silently yielding empty strings. `tags`, `paths`, and `short_id` default
+/// when absent (restic omits `tags` for untagged snapshots) but still error
+/// on a type change. Extra fields restic adds over time are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     /// Full snapshot ID assigned by restic.
@@ -20,10 +23,13 @@ pub struct Snapshot {
     /// Hostname of the machine that produced the snapshot, if restic captured it.
     pub hostname: Option<String>,
     /// Tags attached to the snapshot at backup time.
+    #[serde(default)]
     pub tags: Vec<String>,
     /// Paths the snapshot covers.
+    #[serde(default)]
     pub paths: Vec<String>,
     /// Short form of the snapshot ID, suitable for display and `restore` commands.
+    #[serde(default)]
     pub short_id: String,
 }
 
@@ -62,34 +68,8 @@ impl SnapshotManager {
             return Ok(SnapshotList { snapshots: vec![] });
         }
 
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(output)
+        let snapshots: Vec<Snapshot> = serde_json::from_str(output)
             .map_err(|e| AppError::Other(format!("Failed to parse snapshots JSON: {}", e)))?;
-
-        let snapshots: Vec<Snapshot> = parsed
-            .into_iter()
-            .map(|v| Snapshot {
-                id: v["id"].as_str().unwrap_or("").to_string(),
-                time: v["time"].as_str().unwrap_or("").to_string(),
-                hostname: v["hostname"].as_str().map(String::from),
-                tags: v["tags"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|t| t.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                paths: v["paths"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|p| p.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                short_id: v["short_id"].as_str().unwrap_or("").to_string(),
-            })
-            .collect();
 
         Ok(SnapshotList { snapshots })
     }
@@ -374,16 +354,80 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Verbatim `restic snapshots --json` outputs captured against a real local
+    // repository with restic 0.16.4 (same approach as the RESTIC_SUMMARY_*
+    // fixtures in src/backup.rs). The first fixture filters to two tagged
+    // snapshots (`restic snapshots --json a434fba8 01cb76e5`); the second is an
+    // untagged snapshot, which restic emits with no "tags" key at all.
+    const RESTIC_SNAPSHOTS_TWO_TAGGED: &str = r#"[{"time":"2026-11-15T10:31:23.218486319-07:00","tree":"5f2ac0f467ca8ad9a4751fc4dee71d447b8493d1c9e164503469f830c581cf50","paths":["/data/projects/restic-manager/.omo/session-work/e2e/data/one.txt"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"a434fba8777181895db6a3d34a4a2895e40eb0bd07c8ed99ad333626ce6084d7","short_id":"a434fba8"},{"time":"2026-11-15T10:31:23.90424118-07:00","tree":"d62647d95d8c919a9796c8ae6ad3b1d2124477fad54608f22c9f8dc63f65f0ef","paths":["/data/projects/restic-manager/.omo/session-work/e2e/data/one.txt","/data/projects/restic-manager/.omo/session-work/e2e/data/two.txt"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"tags":["daily"],"program_version":"restic 0.16.4","id":"01cb76e5e47afd9bcc61d9d732f3d22e4c43959a64e3d504c8190890c0f789b6","short_id":"01cb76e5"}]"#;
+
+    const RESTIC_SNAPSHOTS_NO_TAGS_KEY: &str = r#"[{"time":"2026-11-15T10:31:27.18471964-07:00","tree":"5e8e2ad3e485d761e00273960240daff3436976f761a08874ae13975c0851466","paths":["/data/projects/restic-manager/.omo/session-work/e2e/data/three.txt"],"hostname":"baggins-zorin","username":"glenn","uid":1000,"gid":1000,"program_version":"restic 0.16.4","id":"7ff282fbf777b56e601d265733dbd3c97142334a9c2400c9fc4d15f20ac9c95d","short_id":"7ff282fb"}]"#;
+
     #[test]
-    fn test_parse_snapshots_json() {
-        let json = r#"[{"id":"abc123","short_id":"abc123","time":"2024-01-15T10:30:00Z","hostname":"server1","tags":["daily"],"paths":["/home"]}]"#;
-        let result = SnapshotManager::parse_snapshots(json);
-        assert!(result.is_ok());
-        let list = result.unwrap();
+    fn test_parse_snapshots_real_output_two_tagged() {
+        let list = SnapshotManager::parse_snapshots(RESTIC_SNAPSHOTS_TWO_TAGGED).unwrap();
+        assert_eq!(list.snapshots.len(), 2);
+        let first = &list.snapshots[0];
+        assert_eq!(
+            first.id,
+            "a434fba8777181895db6a3d34a4a2895e40eb0bd07c8ed99ad333626ce6084d7"
+        );
+        assert_eq!(first.short_id, "a434fba8");
+        assert_eq!(first.time, "2026-11-15T10:31:23.218486319-07:00");
+        assert_eq!(first.hostname.as_deref(), Some("baggins-zorin"));
+        assert_eq!(first.tags, vec!["daily"]);
+        assert_eq!(
+            first.paths,
+            vec!["/data/projects/restic-manager/.omo/session-work/e2e/data/one.txt"]
+        );
+        assert_eq!(list.snapshots[1].paths.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_snapshots_real_output_no_tags_key() {
+        // restic omits the "tags" key entirely for untagged snapshots; this
+        // must parse with an empty tag list, not fail on a missing field.
+        let list = SnapshotManager::parse_snapshots(RESTIC_SNAPSHOTS_NO_TAGS_KEY).unwrap();
+        assert_eq!(list.snapshots.len(), 1);
+        assert_eq!(list.snapshots[0].short_id, "7ff282fb");
+        assert!(list.snapshots[0].tags.is_empty());
+    }
+
+    #[test]
+    fn test_parse_snapshots_missing_id_errors() {
+        // Schema change: restic renames "id" — must surface as a parse error,
+        // not a snapshot with an empty id.
+        let json =
+            r#"[{"snapshot_id":"abc123","short_id":"abc123","time":"2026-01-01T00:00:00Z"}]"#;
+        assert!(SnapshotManager::parse_snapshots(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_snapshots_missing_time_errors() {
+        let json = r#"[{"id":"abc123","short_id":"abc123"}]"#;
+        assert!(SnapshotManager::parse_snapshots(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_snapshots_mistyped_field_errors() {
+        // Schema change: "time" becomes an object — must error, not default.
+        let json = r#"[{"id":"abc123","time":{"secs":0}}]"#;
+        assert!(SnapshotManager::parse_snapshots(json).is_err());
+    }
+
+    #[test]
+    fn test_parse_snapshots_unknown_extra_fields_ok() {
+        // restic adds fields over time; unknown keys must be ignored.
+        let json = r#"[{"id":"abc123","time":"2026-01-01T00:00:00Z","brand_new_field":42}]"#;
+        let list = SnapshotManager::parse_snapshots(json).unwrap();
         assert_eq!(list.snapshots.len(), 1);
         assert_eq!(list.snapshots[0].id, "abc123");
-        assert_eq!(list.snapshots[0].hostname.as_deref(), Some("server1"));
-        assert_eq!(list.snapshots[0].tags, vec!["daily"]);
+        assert!(list.snapshots[0].hostname.is_none());
+    }
+
+    #[test]
+    fn test_parse_snapshots_malformed_json_errors() {
+        assert!(SnapshotManager::parse_snapshots("not json").is_err());
     }
 
     #[test]
