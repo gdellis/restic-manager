@@ -1,6 +1,6 @@
 use crate::config::{Job, Repository, ResolvedConfig};
 use crate::errors::AppError;
-use crate::snapshot::{Snapshot, SnapshotManager};
+use crate::snapshot::{Snapshot, SnapshotList, SnapshotManager};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -693,6 +693,24 @@ fn load_repo_details(app: Arc<Mutex<App>>, config: &TuiConfig, repo_name: &str) 
 fn load_snapshots_async(app: Arc<Mutex<App>>, config: TuiConfig, job_name: String) {
     let result = SnapshotManager::list(&config.resolved, &job_name);
     let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    apply_snapshot_result(&mut a, &job_name, result);
+}
+
+/// Applies a snapshot-list response, unless the user has selected a
+/// different job since the request was issued.
+///
+/// Applying a stale response would show one repository's snapshots under
+/// another job's name - worse than useless during a restore decision - so
+/// a stale response is discarded, mirroring how the detail loaders guard
+/// on the still-selected name.
+fn apply_snapshot_result(a: &mut App, job_name: &str, result: Result<SnapshotList, AppError>) {
+    if a.selected_job.as_deref() != Some(job_name) {
+        a.push_log(format!(
+            "discarded stale snapshot response for {job_name} (no longer the selected job)"
+        ));
+        return;
+    }
+
     match result {
         Ok(list) => {
             a.snapshots = list.snapshots;
@@ -1163,6 +1181,9 @@ fn build_status_text(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::cmdline_is_daemon;
+    use super::{apply_snapshot_result, App, LogSink};
+    use crate::errors::AppError;
+    use crate::snapshot::{Snapshot, SnapshotList};
 
     fn cmdline(args: &[&str]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1221,5 +1242,81 @@ mod tests {
             "daemon",
             "--log-level=debug"
         ])));
+    }
+
+    fn snapshot(id: &str) -> Snapshot {
+        Snapshot {
+            id: id.to_string(),
+            time: "2026-11-15T00:00:00Z".to_string(),
+            hostname: None,
+            tags: vec![],
+            paths: vec!["/data".to_string()],
+            short_id: id.chars().take(8).collect(),
+        }
+    }
+
+    fn snapshot_result(id: &str) -> Result<SnapshotList, AppError> {
+        Ok(SnapshotList {
+            snapshots: vec![snapshot(id)],
+        })
+    }
+
+    fn new_app() -> App {
+        App::new(LogSink::default(), Vec::new())
+    }
+
+    fn log_lines(app: &App) -> Vec<String> {
+        let state = app.logs.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.lines.iter().cloned().collect()
+    }
+
+    #[test]
+    fn fresh_response_for_the_selected_job_is_applied() {
+        let mut app = new_app();
+        app.selected_job = Some("daily".to_string());
+
+        apply_snapshot_result(&mut app, "daily", snapshot_result("aaa111"));
+
+        assert_eq!(app.snapshots.len(), 1);
+        assert_eq!(app.snapshots[0].id, "aaa111");
+        assert!(app.data_loaded.snapshots);
+    }
+
+    #[test]
+    fn stale_response_for_an_unselected_job_is_discarded() {
+        // Regression for H6: job A's slow response must not overwrite job
+        // B's listing when B was selected (and loaded) in the meantime.
+        let mut app = new_app();
+        app.selected_job = Some("fast".to_string());
+        app.snapshots = vec![snapshot("bbb222")];
+        app.data_loaded.snapshots = true;
+
+        apply_snapshot_result(&mut app, "slow", snapshot_result("slow111"));
+
+        assert_eq!(app.snapshots.len(), 1, "stale snapshots must not land");
+        assert_eq!(app.snapshots[0].id, "bbb222", "fast job's data must stay");
+        assert!(
+            log_lines(&app).iter().any(|l| l.contains("stale snapshot")),
+            "the discard must be visible in the log view: {:?}",
+            log_lines(&app)
+        );
+    }
+
+    #[test]
+    fn stale_error_does_not_flip_the_loading_state() {
+        let mut app = new_app();
+        app.selected_job = Some("current".to_string());
+        app.data_loaded.snapshots = false; // current job still loading
+
+        apply_snapshot_result(
+            &mut app,
+            "old",
+            Err(AppError::Other("repo offline".to_string())),
+        );
+
+        assert!(
+            !app.data_loaded.snapshots,
+            "a stale error must not mark the current job as loaded"
+        );
     }
 }
