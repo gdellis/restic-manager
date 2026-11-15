@@ -40,7 +40,13 @@ struct InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.in_flight.lock().unwrap().remove(&self.name);
+        // Poison-tolerant: even if the mutex was poisoned by a panicking
+        // holder (M18), record the removal so the in-flight set can't leak
+        // an entry during unwinding.
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.name);
     }
 }
 
@@ -63,7 +69,9 @@ trait JobRunner {
 }
 
 /// The production runner: performs the scheduled backup.
-struct BackupRunner;
+struct BackupRunner {
+    rate_limiter: Arc<Mutex<crate::notifications::RateLimiter>>,
+}
 
 impl JobRunner for BackupRunner {
     fn run(
@@ -73,8 +81,9 @@ impl JobRunner for BackupRunner {
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let rate_limiter = Arc::clone(&self.rate_limiter);
         Box::pin(async move {
-            Scheduler::run_backup_job(config, job, name, in_flight).await;
+            Scheduler::run_backup_job(config, job, name, in_flight, rate_limiter).await;
         })
     }
 }
@@ -255,11 +264,18 @@ impl Scheduler {
         // factory rather than a single future because both subscriptions
         // must not be live at the same time - a single SIGTERM would then
         // trigger the force-exit path immediately instead of draining.
+        // One rate-limiter instance for the scheduler's lifetime. The
+        // NotificationManager itself stays per-run (its toggles are per-job),
+        // but the rate-limit windows must carry across runs - see H12.
+        let rate_limiter = Arc::new(Mutex::new(crate::notifications::RateLimiter::default()));
+        let runner = BackupRunner {
+            rate_limiter: Arc::clone(&rate_limiter),
+        };
         self.run_loop(
             || Box::pin(Self::shutdown_signal()) as Pin<Box<dyn Future<Output = ()> + Send>>,
             tick_interval,
             Local::now,
-            &BackupRunner,
+            &runner,
         )
         .await
     }
@@ -329,6 +345,15 @@ impl Scheduler {
                         continue;
                     };
 
+                    // Reap any completed tasks so finished handles (and their
+                    // panic JoinErrors) don't accumulate for the daemon's
+                    // lifetime.
+                    while let Some(res) = tasks.try_join_next() {
+                        if let Err(e) = res {
+                            warn!(error = %e, "Backup task failed to join");
+                        }
+                    }
+
                     // Collect the jobs that come due on this tick.
                     let mut due: Vec<String> = Vec::new();
                     let mut due_set: HashSet<String> = HashSet::new();
@@ -361,8 +386,17 @@ impl Scheduler {
                 }
 
                 Some(name) = rx.recv() => {
+                    // Reap any completed tasks so finished handles (and their
+                    // panic JoinErrors) don't accumulate for the daemon's
+                    // lifetime.
+                    while let Some(res) = tasks.try_join_next() {
+                        if let Err(e) = res {
+                            warn!(error = %e, "Backup task failed to join");
+                        }
+                    }
+
                     {
-                        let mut running = in_flight.lock().unwrap();
+                        let mut running = in_flight.lock().unwrap_or_else(|p| p.into_inner());
                         if !Self::try_start(&mut running, &name) {
                             warn!(job = %name, "Skipping trigger: job is already running");
                             continue;
@@ -426,6 +460,7 @@ impl Scheduler {
         job: Option<Job>,
         name: String,
         in_flight: Arc<Mutex<HashSet<String>>>,
+        rate_limiter: Arc<Mutex<crate::notifications::RateLimiter>>,
     ) {
         let _guard = InFlightGuard {
             in_flight,
@@ -434,9 +469,9 @@ impl Scheduler {
 
         info!(job = %name, "Starting scheduled backup");
 
-        let notifier = job
-            .as_ref()
-            .map(|j| NotificationManager::new(&config, j.notifications.clone()));
+        let notifier = job.as_ref().map(|j| {
+            NotificationManager::with_rate_limiter(&config, j.notifications.clone(), rate_limiter)
+        });
 
         let blocking_name = name.clone();
         let join_result =
@@ -791,6 +826,36 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!in_flight.lock().unwrap().contains("job"));
+    }
+
+    #[test]
+    fn test_in_flight_guard_drop_poisoned_mutex_does_not_panic() {
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        assert!(Scheduler::try_start(
+            &mut in_flight.lock().unwrap_or_else(|p| p.into_inner()),
+            "job"
+        ));
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = in_flight.lock().unwrap();
+            panic!("poison");
+        }));
+
+        let guard_in_flight = Arc::clone(&in_flight);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = InFlightGuard {
+                in_flight: guard_in_flight,
+                name: "job".to_string(),
+            };
+            // drop on scope exit
+        }));
+        assert!(result.is_ok(), "drop must not panic on poisoned mutex");
+        // Removal should still have been recorded.
+        assert!(!in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains("job"));
     }
 
     #[tokio::test]
