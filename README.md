@@ -227,7 +227,7 @@ that behavior — see the comments in the unit files.
 | --- | --- |
 | `repositories.<name>.repo` | Restic repository path |
 | `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
-| `jobs.<name>` | Job name; also a file name under `excludes.d/`, so no `/`, `\`, `:`, `.` or `..` |
+| `jobs.<name>` | Job name; also a file name under `excludes.d/`: no `/`, `\` or `:`, and not `.` or `..` |
 | `jobs.<name>.repository` | Repository name to use |
 | `jobs.<name>.paths` | List of paths to backup |
 | `jobs.<name>.exclude_patterns` | List of exclude patterns, written to `excludes.d/<name>.txt` in the config dir |
@@ -241,6 +241,7 @@ that behavior — see the comments in the unit files.
 
 A configured `exclude_file` is checked after the pre-backup hooks run (so a hook may generate
 it); if it is missing the job fails rather than silently backing up with the default excludes.
+`--dry-run` skips hooks, so a hook-generated file must already exist for a dry run.
 
 ### secrets.yaml
 
