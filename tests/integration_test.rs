@@ -264,9 +264,9 @@ jobs:
     assert_eq!(retention.keep_daily, Some(7));
     assert_eq!(retention.keep_weekly, Some(4));
     assert_eq!(retention.keep_monthly, Some(6));
-    // Not set in the YAML; documents the field's default (see
-    // default_keep_last() in src/config.rs) rather than leaving it unasserted.
-    assert_eq!(retention.keep_last, Some(3));
+    // M20: no rule is silently defaulted. The README example only lists
+    // keep_daily/weekly/monthly, so keep_last stays None.
+    assert_eq!(retention.keep_last, None);
 
     assert!(job.notifications.on_failure);
     assert!(!job.notifications.on_success);
