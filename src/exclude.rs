@@ -53,15 +53,47 @@ pub fn exclude_file_path() -> Result<PathBuf, std::io::Error> {
     Ok(config_dir()?.join("excludes.txt"))
 }
 
+/// Creates a directory and its parents with mode `0700` on Unix.
+///
+/// `0700` matches the permission warning in `secrets.rs`: the directory
+/// holds `secrets.yaml` (plaintext passwords) and should not be readable
+/// or writable by group or others. If the directory already existed with
+/// looser permissions, it is chmod'd to 0700; this is intentional — the
+/// directory is reserved for restic-manager secrets.
+fn create_dir_all_secure(dir: &std::path::Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        // Ensure the requested mode survives the process umask and any
+        // pre-existing directory with looser permissions.
+        let mut perms = std::fs::metadata(dir)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
 pub fn ensure_default_exclude_file() -> Result<PathBuf, std::io::Error> {
-    let path = exclude_file_path()?;
+    ensure_default_exclude_file_in(&exclude_file_path()?)
+}
+
+fn ensure_default_exclude_file_in(path: &std::path::Path) -> Result<PathBuf, std::io::Error> {
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            create_dir_all_secure(parent)?;
         }
-        std::fs::write(&path, default_exclude_content())?;
+        std::fs::write(path, default_exclude_content())?;
     }
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 /// Checks that a job name can be used verbatim as a file name inside
@@ -182,12 +214,44 @@ mod tests {
         assert!(default_exclude_content().contains(".git"));
     }
 
+    /// M9: when ensure_default_exclude_file creates the config directory,
+    /// it must be mode 0700 on Unix so secrets.yaml created alongside it
+    /// starts in a private directory.
+    #[test]
+    fn test_default_exclude_file_creates_secure_config_dir() {
+        let scratch = Scratch::new("secure-dir");
+        let path = scratch.config_dir().join("excludes.txt");
+        ensure_default_exclude_file_in(&path).unwrap();
+        assert!(path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(scratch.config_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "config dir must be created with mode 0700, got {:o}",
+                mode
+            );
+        }
+    }
+
     #[test]
     fn test_config_dir_returns_path() {
         let result = config_dir();
         assert!(result.is_ok());
         let path = result.unwrap();
-        assert!(path.to_str().unwrap().ends_with("restic-manager"));
+        let suffix = std::path::MAIN_SEPARATOR_STR.to_string() + "restic-manager";
+        assert!(
+            path.to_str().unwrap().ends_with(&suffix),
+            "expected path to end with '{}', got {:?}",
+            suffix,
+            path
+        );
     }
 
     /// A fresh scratch directory per test, removed on drop (including when

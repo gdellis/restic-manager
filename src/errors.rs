@@ -1,13 +1,22 @@
 use crate::redact::RedactedText;
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("Failed to read config file: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("Failed to read config file '{}': {source}", path.display())]
+    IoError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
-    #[error("Failed to parse YAML: {0}")]
-    ParseError(#[from] serde_yaml::Error),
+    #[error("Failed to parse YAML '{}': {source}", path.display())]
+    ParseError {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
 
     #[error("Config file not found: {0}")]
     NotFound(String),
@@ -21,11 +30,19 @@ pub enum ConfigError {
 
 #[derive(Error, Debug)]
 pub enum SecretsError {
-    #[error("Failed to read secrets file: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("Failed to read secrets file '{}': {source}", path.display())]
+    IoError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
-    #[error("Failed to parse YAML: {0}")]
-    ParseError(#[from] serde_yaml::Error),
+    #[error("Failed to parse YAML '{}': {source}", path.display())]
+    ParseError {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
 
     #[error("Secrets file not found: {0}")]
     NotFound(String),
@@ -117,6 +134,82 @@ pub type Result<T> = std::result::Result<T, AppError>;
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+    use std::path::PathBuf;
+
+    /// M8: config IO and parse errors must include the file path so the
+    /// user knows which file failed.
+    #[test]
+    fn test_config_error_includes_path() {
+        let path = PathBuf::from("/some/config.yaml");
+        let io_err = ConfigError::IoError {
+            path: path.clone(),
+            source: Error::new(ErrorKind::PermissionDenied, "denied"),
+        };
+        let msg = io_err.to_string();
+        assert!(msg.contains("/some/config.yaml"), "{}", msg);
+        assert!(msg.contains("denied"), "{}", msg);
+
+        let parse_err = ConfigError::ParseError {
+            path: path.clone(),
+            source: serde_yaml::from_str::<i32>(":").unwrap_err(),
+        };
+        let msg = parse_err.to_string();
+        assert!(msg.contains("/some/config.yaml"), "{}", msg);
+    }
+
+    /// M8: secrets IO and parse errors must include the file path.
+    #[test]
+    fn test_secrets_error_includes_path() {
+        let path = PathBuf::from("/some/secrets.yaml");
+        let io_err = SecretsError::IoError {
+            path: path.clone(),
+            source: Error::new(ErrorKind::NotFound, "not found"),
+        };
+        let msg = io_err.to_string();
+        assert!(msg.contains("/some/secrets.yaml"), "{}", msg);
+        assert!(msg.contains("not found"), "{}", msg);
+
+        let parse_err = SecretsError::ParseError {
+            path,
+            source: serde_yaml::from_str::<i32>("{").unwrap_err(),
+        };
+        let msg = parse_err.to_string();
+        assert!(msg.contains("/some/secrets.yaml"), "{}", msg);
+    }
+
+    /// M8: a real load failure must surface the file path, not just the
+    /// inner serde_yaml/IO message. Uses a direct path so it does not
+    /// rely on the process-global `RESTIC_MANAGER_CONFIG_DIR` variable,
+    /// which races under multi-threaded test runners such as tarpaulin.
+    #[test]
+    fn test_config_load_bad_yaml_error_includes_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "restic-manager-test-config-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.yaml");
+        std::fs::write(&cfg, "not: valid: yaml: [").unwrap();
+
+        let err = crate::config::Config::load_with_problems_from(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(cfg.to_str().unwrap()),
+            "expected path in error, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("parse"),
+            "expected parse failure, got: {}",
+            msg
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn test_from_io_not_found_becomes_not_found_variant() {
