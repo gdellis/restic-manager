@@ -179,8 +179,9 @@ impl Scheduler {
     /// deferred list keeps its order and the queue fills in order rather
     /// than being churned.
     fn flush_deferred(tx: &mpsc::Sender<String>, deferred: &mut VecDeque<String>) {
-        while let Some(name) = deferred.front().cloned() {
-            match tx.try_send(name.clone()) {
+        while let Some(name) = deferred.front() {
+            let name = name.clone();
+            match tx.try_send(name) {
                 Ok(()) => {
                     deferred.pop_front();
                 }
