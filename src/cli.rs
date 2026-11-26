@@ -7,6 +7,7 @@ use crate::scheduler::Scheduler;
 use crate::shutdown;
 use crate::snapshot::SnapshotManager;
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(name = "restic-manager")]
@@ -208,11 +209,7 @@ fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError
         Commands::List { name, format } => {
             let snapshots = SnapshotManager::list(&config, &name)?;
             if format.as_deref() == Some("json") {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&snapshots.snapshots)
-                        .unwrap_or_else(|e| format!("[json error: {}]", e))
-                );
+                print_json(&snapshots.snapshots);
             } else {
                 println!("Snapshots for job '{}':", name);
                 for snap in snapshots.snapshots {
@@ -231,14 +228,14 @@ fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError
             scheduler.run()?;
         }
         Commands::Jobs { format } => {
-            let jobs = config.config.list_jobs();
+            let jobs: Vec<String> = config
+                .config
+                .list_jobs()
+                .into_iter()
+                .map(String::from)
+                .collect();
             if format.as_deref() == Some("json") {
-                let names: Vec<String> = jobs.into_iter().map(String::from).collect();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&names)
-                        .unwrap_or_else(|e| format!("[json error: {}]", e))
-                );
+                print_json(&jobs);
             } else {
                 println!("Configured jobs:");
                 for job in jobs {
@@ -247,14 +244,14 @@ fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError
             }
         }
         Commands::Repos { format } => {
-            let repos = config.config.list_repositories();
+            let repos: Vec<String> = config
+                .config
+                .list_repositories()
+                .into_iter()
+                .map(String::from)
+                .collect();
             if format.as_deref() == Some("json") {
-                let names: Vec<String> = repos.into_iter().map(String::from).collect();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&names)
-                        .unwrap_or_else(|e| format!("[json error: {}]", e))
-                );
+                print_json(&repos);
             } else {
                 println!("Configured repositories:");
                 for repo in repos {
@@ -278,59 +275,9 @@ fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError
                     .get_job(&name)
                     .ok_or_else(|| AppError::Other(format!("Job '{}' not found", name)))?;
                 if format.as_deref() == Some("json") {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(job)
-                            .unwrap_or_else(|e| format!("[json error: {}]", e))
-                    );
+                    print_json(job);
                 } else {
-                    println!("Job '{}' details:", name);
-                    println!("  repository: {}", job.repository);
-                    println!(
-                        "  paths: {}",
-                        job.paths
-                            .iter()
-                            .filter_map(|p| p.to_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    if let Some(schedule) = &job.schedule {
-                        println!("  schedule: {}", schedule);
-                    } else {
-                        println!("  schedule: (none)");
-                    }
-                    if let Some(retention) = &job.retention {
-                        println!("  retention:");
-                        if let Some(v) = retention.keep_last {
-                            println!("    keep_last: {}", v);
-                        }
-                        if let Some(v) = retention.keep_hourly {
-                            println!("    keep_hourly: {}", v);
-                        }
-                        if let Some(v) = retention.keep_daily {
-                            println!("    keep_daily: {}", v);
-                        }
-                        if let Some(v) = retention.keep_weekly {
-                            println!("    keep_weekly: {}", v);
-                        }
-                        if let Some(v) = retention.keep_monthly {
-                            println!("    keep_monthly: {}", v);
-                        }
-                        if let Some(v) = retention.keep_yearly {
-                            println!("    keep_yearly: {}", v);
-                        }
-                    } else {
-                        println!("  retention: (none)");
-                    }
-                    println!(
-                        "  notifications: on_failure={} on_success={}",
-                        job.notifications.on_failure, job.notifications.on_success
-                    );
-                    println!(
-                        "  hooks: pre_backup={} post_backup={}",
-                        job.pre_backup.len(),
-                        job.post_backup.len()
-                    );
+                    print_job_details(job, &name);
                 }
             }
             ShowKind::Repo => {
@@ -339,18 +286,9 @@ fn run_command(command: Commands, config: ResolvedConfig) -> Result<(), AppError
                     .get_repository(&name)
                     .ok_or_else(|| AppError::Other(format!("Repository '{}' not found", name)))?;
                 if format.as_deref() == Some("json") {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(repo)
-                            .unwrap_or_else(|e| format!("[json error: {}]", e))
-                    );
+                    print_json(repo);
                 } else {
-                    println!("Repository '{}' details:", name);
-                    println!("  repo: {}", repo.repo);
-                    println!("  password_key: {}", mask_password_key(&repo.password_key));
-                    if let Some(log_cli_output) = &repo.log_cli_output {
-                        println!("  log_cli_output: {}", log_cli_output.display());
-                    }
+                    print_repo_details(repo, &name);
                 }
             }
         },
@@ -369,6 +307,76 @@ fn mask_password_key(key: &str) -> String {
         format!("{}***", key.chars().take(2).collect::<String>())
     } else {
         "***".to_string()
+    }
+}
+
+/// Print a value as pretty JSON, falling back to a plain error string if
+/// serialization fails.
+fn print_json<T: Serialize>(value: &T) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("[json error: {}]", e))
+    );
+}
+
+/// Print human-readable details for a job (used by the `show` command).
+fn print_job_details(job: &crate::config::Job, name: &str) {
+    println!("Job '{}' details:", name);
+    println!("  repository: {}", job.repository);
+    println!(
+        "  paths: {}",
+        job.paths
+            .iter()
+            .filter_map(|p| p.to_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if let Some(schedule) = &job.schedule {
+        println!("  schedule: {}", schedule);
+    } else {
+        println!("  schedule: (none)");
+    }
+    if let Some(retention) = &job.retention {
+        println!("  retention:");
+        if let Some(v) = retention.keep_last {
+            println!("    keep_last: {}", v);
+        }
+        if let Some(v) = retention.keep_hourly {
+            println!("    keep_hourly: {}", v);
+        }
+        if let Some(v) = retention.keep_daily {
+            println!("    keep_daily: {}", v);
+        }
+        if let Some(v) = retention.keep_weekly {
+            println!("    keep_weekly: {}", v);
+        }
+        if let Some(v) = retention.keep_monthly {
+            println!("    keep_monthly: {}", v);
+        }
+        if let Some(v) = retention.keep_yearly {
+            println!("    keep_yearly: {}", v);
+        }
+    } else {
+        println!("  retention: (none)");
+    }
+    println!(
+        "  notifications: on_failure={} on_success={}",
+        job.notifications.on_failure, job.notifications.on_success
+    );
+    println!(
+        "  hooks: pre_backup={} post_backup={}",
+        job.pre_backup.len(),
+        job.post_backup.len()
+    );
+}
+
+/// Print human-readable details for a repository (used by the `show` command).
+fn print_repo_details(repo: &crate::config::Repository, name: &str) {
+    println!("Repository '{}' details:", name);
+    println!("  repo: {}", repo.repo);
+    println!("  password_key: {}", mask_password_key(&repo.password_key));
+    if let Some(log_cli_output) = &repo.log_cli_output {
+        println!("  log_cli_output: {}", log_cli_output.display());
     }
 }
 
