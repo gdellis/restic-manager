@@ -10,13 +10,16 @@ A CLI tool for simplifying configuration and management of restic backups with b
 flowchart TB
     subgraph CLI["CLI Layer"]
         commands[Commands<br/>run, restore, prune, etc.]
+        tui[TUI<br/>ratatui dashboard]
     end
 
     subgraph Core["Core Layer"]
         config[Config Loading]
         secrets[Secrets Loading]
+        redact[Redaction]
         scheduler[Scheduler]
         logging[Logging]
+        shutdown[Shutdown Watcher]
     end
 
     subgraph Operations["Operations Layer"]
@@ -27,31 +30,30 @@ flowchart TB
     end
 
     subgraph Notifications["Notification Layer"]
-        telegram[Telegram Bot]
+        notifications[NotificationManager<br/>rate limiting, per-job toggles]
     end
 
     subgraph External["External"]
-        restic[Restic CLI]
+        restic[Restic CLI<br/>tracked child]
         tg_api[Telegram API]
     end
 
     commands --> config
     commands --> secrets
     commands --> scheduler
+    commands --> tui
     scheduler --> backup
-    scheduler --> restore
-    scheduler --> snapshot
+    scheduler --> notifications
+    notifications --> backup
 
     backup --> restic
     restore --> restic
     snapshot --> restic
     repository --> restic
 
-    backup --> telegram
-    restore --> telegram
-    snapshot --> telegram
-
-    telegram --> tg_api
+    redact --> logging
+    redact --> notifications
+    notifications --> tg_api
 ```
 
 ## Module Structure
@@ -59,58 +61,69 @@ flowchart TB
 ```mermaid
 classDiagram
     class Config {
-        +repositories: HashMap~String, Repository~
-        +jobs: HashMap~String, Job~
-        +load() Config
-        +validate() Result
+        +repositories: BTreeMap~String, Repository~
+        +jobs: BTreeMap~String, Job~
+        +load() Result~Config~
+        +load_with_problems() Result~(Config, Vec~String~)~
+        +problems() Vec~String~
+    }
+
+    class ResolvedConfig {
+        +config: Config
+        +secrets: Secrets
+        +load() Result~ResolvedConfig~
+        +load_partial() Result~(ResolvedConfig, Vec~String~)~
+        +resolve_job(name) Result~(Job, Repository, password)~
     }
 
     class Secrets {
         +values: HashMap~String, String~
         +telegram: Option~TelegramConfig~
-        +load() Secrets
+        +load() Result~Secrets~
+        +load_optional() Result~Option~Secrets~~
         +get(key: &str) Option~&str~
     }
 
     class Job {
-        +name: String
         +repository: String
         +paths: Vec~PathBuf~
         +schedule: Option~String~
-        +retention: RetentionPolicy
+        +retention: Option~RetentionPolicy~
         +notifications: NotificationConfig
         +pre_backup: Vec~Hook~
         +post_backup: Vec~Hook~
     }
 
     class Backup {
-        +run(job: &Job, secrets: &Secrets) Result~BackupResult~
+        +run(config, job_name, dry_run) Result~BackupResult~
         +execute_backup() Result
     }
 
     class Restore {
-        +restore_latest(job: &Job, secrets: &Secrets) Result
-        +restore_snapshot(id: &str) Result
+        +restore_latest(config, job) Result
+        +restore_snapshot(config, job, id) Result
     }
 
     class Scheduler {
-        +add_job(job: Job)
-        +start() Result
-        +stop()
+        +new(config) Result~Scheduler~
+        +run() Result
+        +list_scheduled_jobs() Vec~ScheduledJob~
     }
 
-    class Notification {
-        +send_failure(msg: &str) Result
-        +send_success(msg: &str) Result
+    class NotificationManager {
+        +new(config, job_config) Result~Self~
+        +notify_failure(job, error) Result
+        +notify_success(job, snapshot) Result
     }
 
     Config --> Job
-    Secrets --> Backup
-    Secrets --> Restore
+    ResolvedConfig --> Config
+    ResolvedConfig --> Secrets
+    ResolvedConfig --> Backup
+    ResolvedConfig --> Restore
     Job --> Backup
-    Job --> Restore
     Scheduler --> Backup
-    Notification --> Backup
+    Scheduler --> NotificationManager
 ```
 
 ## Data Flow
@@ -319,12 +332,35 @@ warn (but don't fail) if the file is more permissive than that.
 - Shell completion support - **not yet implemented**
 - Colored output for errors/warnings - **not yet implemented** (plain `println!`/`eprintln!`)
 
+### src/tui.rs
+
+- Ratatui-based interactive dashboard (read-only, action-oriented)
+- Named background threads (`spawn_named`); terminates leftover children on exit
+- Reloads config without restart (M11) and handles terminal resize (M12)
+
+### src/restic_child.rs
+
+- Tracks every spawned `restic` child process so shutdown paths can
+  terminate it before the manager exits (H7): a surviving child would keep
+  the repository locked. Waits by polling so a concurrent shutdown can take
+  the child lock; already-reaped children are left alone (PID-reuse safety).
+
+### src/redact.rs
+
+- Strips credentials embedded in repository URLs from error text before it
+  reaches logs or Telegram; `RedactedText` wrapper type
+
+### src/shutdown.rs
+
+- One-shot commands install a watcher that terminates tracked restic
+  children on SIGTERM/SIGINT and exits with status 130
+
 ### src/config.rs
 
 - Load and validate config.yaml
 - Load secrets.yaml (gitignored)
 - Resolve password_key references
-- Validate job configurations
+- Validate job configurations; retention defaults to explicit-only (#143)
 
 ### src/repository.rs
 
@@ -356,7 +392,8 @@ warn (but don't fail) if the file is more permissive than that.
 
 - Parse cron expressions using `cron` crate
 - Tokio-based async scheduler
-- Job queue with concurrency control
+- Job queue with bounded concurrency (`MAX_CONCURRENT_BACKUPS`, semaphore)
+- Deferred-dispatch queue with supersede semantics; in-flight dedup per job
 - Graceful shutdown on SIGINT/Ctrl-C and (on unix) SIGTERM: stop scheduling, drain in-flight jobs
 - Runs in the foreground by design; systemd units in `contrib/systemd/` supervise it
 
@@ -405,6 +442,13 @@ tracing-subscriber = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "2"
 dirs = "6"
+crossterm = "0.29"
+ratatui = "0.30"
+indicatif = "0.17"
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
 ```
 
 ## Implementation Phases

@@ -233,7 +233,7 @@ comments in the unit files.
 | --- | --- |
 | `repositories.<name>.repo` | Restic repository path |
 | `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
-| `jobs.<name>` | Job name; restricted as a file name under `excludes.d/` (no `/`, `\` or `:`, not `.` or `..`) only when `exclude_patterns` is set |
+| `jobs.<name>` | Job name; restricted as a file name under `excludes.d/` only when `exclude_patterns` is set |
 | `jobs.<name>.repository` | Repository name to use |
 | `jobs.<name>.paths` | List of paths to backup |
 | `jobs.<name>.exclude_patterns` | List of exclude patterns, written to `excludes.d/<name>.txt` in the config dir |
@@ -271,7 +271,7 @@ cargo coverage
 
 ```mermaid
 flowchart TB
-    CLI["CLI Layer<br/>run · restore · prune · list · check · daemon · jobs"]
+    CLI["CLI Layer<br/>run · restore · prune · list · check · daemon · tui · jobs"]
 
     subgraph Core[" "]
         Config[Config]
@@ -281,6 +281,7 @@ flowchart TB
 
     subgraph Executor[" "]
         Backup[Backup]
+        Notify[NotificationManager]
     end
 
     subgraph External[" "]
@@ -295,9 +296,10 @@ flowchart TB
     Config --> Backup
     Secrets --> Backup
     Scheduler --> Backup
+    Scheduler --> Notify
     Backup --> Restic
-    Backup --> Telegram
     Backup --> Hooks
+    Notify --> Telegram
 ```
 
 ## License
