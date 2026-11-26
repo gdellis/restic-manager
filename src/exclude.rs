@@ -141,6 +141,10 @@ pub fn validate_job_file_name(job_name: &str) -> Result<(), String> {
     }
 }
 
+/// Writes the per-job exclude file atomically: the content is staged in a
+/// sibling temp file and renamed into place, so a concurrent reader (a
+/// manual backup run overlapping the daemon's, or a long-lived restic)
+/// can never observe a truncated pattern list mid-rewrite.
 fn write_job_excludes_in(
     dir: &Path,
     job_name: &str,
@@ -150,8 +154,12 @@ fn write_job_excludes_in(
         .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.txt", job_name));
+    let tmp = dir.join(format!(".{}.txt.tmp", job_name));
     let content: String = patterns.iter().map(|p| format!("{}\n", p)).collect();
-    std::fs::write(&path, content)?;
+    std::fs::write(&tmp, content)?;
+    // Same-directory rename: atomic on both Unix and Windows, and never
+    // crosses a filesystem boundary.
+    std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 
@@ -365,6 +373,34 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "*.tmp\nnode_modules\n"
         );
+        // The atomic write must leave no staging file behind.
+        assert!(!excludes_d.join(".daily.txt.tmp").exists());
+    }
+
+    /// A rewrite of an existing per-job exclude file must leave the old
+    /// content in place until the rename, so a concurrent reader either
+    /// sees the complete old list or the complete new list — never a
+    /// truncated file. With the rename in place there is no observable
+    /// torn state; this pins the staging behaviour.
+    #[test]
+    fn test_write_job_excludes_rewrite_leaves_staging_file_neither_old_nor_torn() {
+        let scratch = Scratch::new("rewrite");
+        let excludes_d = scratch.config_dir().join("excludes.d");
+
+        write_job_excludes_in(&excludes_d, "daily", &["old".to_string()]).unwrap();
+        let path = write_job_excludes_in(
+            &excludes_d,
+            "daily",
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nb\nc\n",
+            "rewritten file must hold the complete new content"
+        );
+        assert!(!excludes_d.join(".daily.txt.tmp").exists());
     }
 
     /// M1: an explicitly configured exclude_file that is missing must be
