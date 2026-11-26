@@ -233,7 +233,7 @@ comments in the unit files.
 | --- | --- |
 | `repositories.<name>.repo` | Restic repository path |
 | `repositories.<name>.password_key` | Key in secrets.yaml for repository password |
-| `jobs.<name>` | Job name; also a file name under `excludes.d/`: no `/`, `\` or `:`, and not `.` or `..` |
+| `jobs.<name>` | Job name; restricted as a file name under `excludes.d/` (no `/`, `\` or `:`, not `.` or `..`) only when `exclude_patterns` is set |
 | `jobs.<name>.repository` | Repository name to use |
 | `jobs.<name>.paths` | List of paths to backup |
 | `jobs.<name>.exclude_patterns` | List of exclude patterns, written to `excludes.d/<name>.txt` in the config dir |

@@ -317,8 +317,31 @@ impl Job {
 
         // The job name becomes a file name under excludes.d/ when the job
         // has exclude_patterns, so it must be a plain path component.
-        if let Err(msg) = crate::exclude::validate_job_file_name(name) {
-            errors.push(msg);
+        // Scoped: a job that never materialises patterns (it uses an
+        // exclude_file or nothing) does not touch the filesystem with its
+        // name, so names like "photos:2026" stay valid for those jobs.
+        let has_patterns = self
+            .exclude_patterns
+            .as_ref()
+            .is_some_and(|p| !p.is_empty());
+        if has_patterns {
+            if let Err(msg) = crate::exclude::validate_job_file_name(name) {
+                errors.push(msg);
+            }
+            for (i, pattern) in self
+                .exclude_patterns
+                .iter()
+                .flat_map(|p| p.iter())
+                .enumerate()
+            {
+                if pattern.contains('\n') {
+                    errors.push(format!(
+                        "exclude pattern at index {} contains a newline; \
+                         each pattern must be a single line",
+                        i + 1
+                    ));
+                }
+            }
         }
         if self.repository.trim().is_empty() {
             errors.push("empty repository reference".to_string());
@@ -665,6 +688,80 @@ shedule: "0 2 * * *"
         assert!(result.is_err());
     }
 
+    /// A job name with separators is only rejected when the job actually
+    /// materialises patterns under excludes.d/; a job that uses an
+    /// exclude_file (or neither) never writes its name to disk.
+    #[test]
+    fn test_job_name_separator_only_rejected_with_patterns() {
+        // With patterns, a colon in the job name must be rejected.
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  "photos:2026":
+    repository: test
+    paths:
+      - /home
+    exclude_patterns:
+      - "*.tmp"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.problems().join("\n");
+        assert!(
+            err.contains("must not contain"),
+            "colon job name with patterns must be rejected: {}",
+            err
+        );
+
+        // Same name without patterns must validate.
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  "photos:2026":
+    repository: test
+    paths:
+      - /home
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.problems().is_empty(),
+            "colon job name without patterns must be valid: {:?}",
+            config.problems()
+        );
+    }
+
+    /// An exclude pattern containing a newline would silently split into
+    /// two exclude rules when written to the file; it must be a config
+    /// error instead.
+    #[test]
+    fn test_job_rejects_newline_in_exclude_pattern() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  bad:
+    repository: test
+    paths:
+      - /home
+    exclude_patterns:
+      - "*.tmp\n.secret"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.problems().join("\n");
+        assert!(
+            err.contains("newline"),
+            "newline pattern must be rejected: {}",
+            err
+        );
+    }
+
     #[test]
     fn test_config_rejects_unknown_top_level_field() {
         let yaml = r#"
@@ -933,9 +1030,11 @@ jobs:
 
     #[test]
     fn test_job_name_with_path_traversal_is_rejected() {
-        // H13: the job name becomes a file name under excludes.d/, so a
-        // name with traversal segments or separators must fail validation
-        // instead of writing outside the config directory at backup time.
+        // H13: the job name becomes a file name under excludes.d/ when the
+        // job materialises exclude_patterns, so a name with traversal
+        // segments or separators must fail validation for such jobs.
+        // The offending jobs carry patterns so the check applies; the
+        // last job has no patterns, and its plain name stays valid.
         let yaml = r#"
 repositories:
   test:
@@ -946,10 +1045,14 @@ jobs:
     repository: test
     paths:
     - /tmp/data
+    exclude_patterns:
+    - "*.tmp"
   "nested/name":
     repository: test
     paths:
     - /tmp/data
+    exclude_patterns:
+    - "*.tmp"
   fine-name:
     repository: test
     paths:
@@ -974,6 +1077,30 @@ jobs:
             !problems.iter().any(|p| p.contains("fine-name")),
             "{:?}",
             problems
+        );
+    }
+
+    /// Scoped validation: a job whose name would be unusable as a file
+    /// name is still valid when it never materialises exclude_patterns,
+    /// because nothing is ever written under excludes.d/ with its name.
+    #[test]
+    fn test_traversal_job_name_without_patterns_is_accepted() {
+        let yaml = r#"
+repositories:
+  test:
+    repo: /tmp/repo
+    password_key: pass
+jobs:
+  "nested/name":
+    repository: test
+    paths:
+    - /tmp/data
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.problems().is_empty(),
+            "a name never used as a file name must not be restricted: {:?}",
+            config.problems()
         );
     }
 
