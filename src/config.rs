@@ -20,11 +20,14 @@ fn join_errors(prefix: &str, errors: Vec<String>) -> String {
     format!(
         "{} has the following problems:\n{}",
         prefix,
-        errors
-            .into_iter()
-            .map(|e| format!("- {}", e))
-            .collect::<Vec<_>>()
-            .join("\n")
+        errors.into_iter().fold(String::new(), |mut acc, e| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str("- ");
+            acc.push_str(&e);
+            acc
+        })
     )
 }
 

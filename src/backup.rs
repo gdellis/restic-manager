@@ -53,16 +53,16 @@ fn format_progress(
 
 fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
+    let mut size = bytes;
     let mut unit_idx = 0;
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
+    while size >= 1024 && unit_idx < UNITS.len() - 1 {
+        size >>= 10;
         unit_idx += 1;
     }
     if unit_idx == 0 {
-        format!("{} B", size as u64)
+        format!("{} B", size)
     } else {
-        format!("{:.3} {}", size, UNITS[unit_idx])
+        format!("{} {}", size, UNITS[unit_idx])
     }
 }
 
@@ -285,11 +285,21 @@ impl Backup {
         }
 
         debug!(
-            "Executing: restic {}",
-            args.iter()
-                .map(|a| redact_credentials(a))
-                .collect::<Vec<_>>()
-                .join(" ")
+            command = %{
+                let mut joined = String::new();
+                for (i, arg) in args.iter().map(|a| redact_credentials(a)).enumerate() {
+                    if i > 0 {
+                        joined.push(' ');
+                    }
+                    if arg.contains(' ') || arg.contains('"') || arg.contains('\'') {
+                        joined.push_str(&format!("{:?}", std::ffi::OsString::from(&arg)));
+                    } else {
+                        joined.push_str(&arg);
+                    }
+                }
+                joined
+            },
+            "Executing restic command"
         );
 
         if dry_run {

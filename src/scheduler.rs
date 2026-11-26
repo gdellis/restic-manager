@@ -612,20 +612,33 @@ impl Scheduler {
         }
     }
 
-    pub fn list_scheduled_jobs(&self) -> Vec<(&str, String)> {
+    pub fn list_scheduled_jobs(&self) -> Vec<ScheduledJob> {
         self.jobs
             .iter()
             .map(|(name, entry)| {
-                let next = entry
+                let next_run = entry
                     .schedule
                     .upcoming(Local)
                     .next()
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_default();
-                (name.as_str(), next)
+                ScheduledJob {
+                    name: name.clone(),
+                    next_run,
+                }
             })
             .collect()
     }
+}
+
+/// A scheduled job returned by [`Scheduler::list_scheduled_jobs`].
+#[derive(Debug, Clone)]
+pub struct ScheduledJob {
+    /// The job's name as declared in the config.
+    pub name: String,
+    /// The next scheduled run time in RFC3339 format, or the empty string
+    /// if the schedule cannot produce one.
+    pub next_run: String,
 }
 
 /// Render an error for logging and notification, with any credentials
@@ -727,7 +740,7 @@ mod tests {
         let scheduler = Scheduler::new(test_config()).unwrap();
         let jobs = scheduler.list_scheduled_jobs();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].0, "test-job");
+        assert_eq!(jobs[0].name, "test-job");
     }
 
     #[test]
