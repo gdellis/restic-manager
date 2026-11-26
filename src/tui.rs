@@ -22,6 +22,21 @@ const DAEMON_CHECK_SECONDS: u64 = 5;
 const FOOTER_HINTS: &str =
     "?:help n/k list Enter select r:run R:restore l:list p:prune c:check L:logs u:reload q:quit";
 
+/// Spawn a background thread with a descriptive name.
+///
+/// Naming threads makes diagnostics (e.g. stack traces and debugger views)
+/// easier to read.
+fn spawn_named<F, T>(name: &str, f: F) -> std::thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .expect("failed to spawn background thread")
+}
+
 // ---------------------------------------------------------------------------
 // Log sink
 // ---------------------------------------------------------------------------
@@ -130,7 +145,7 @@ struct App {
     /// Configuration problems found while loading, shown in the UI.
     problems: Vec<String>,
     status_message: Option<(String, Instant)>,
-    running_label: Arc<Mutex<Option<String>>>,
+    running_label: Option<String>,
     child_pids: Arc<Mutex<Vec<u32>>>,
     data_loaded: DataLoaded,
     daemon_running: bool,
@@ -162,7 +177,7 @@ impl App {
             logs,
             problems,
             status_message: None,
-            running_label: Arc::new(Mutex::new(None)),
+            running_label: None,
             child_pids: Arc::new(Mutex::new(Vec::new())),
             data_loaded: DataLoaded {
                 jobs: false,
@@ -305,12 +320,19 @@ fn kill_remaining_children(child_pids: &Arc<Mutex<Vec<u32>>>) {
         .drain(..)
         .collect();
     for pid in pids {
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable SIGTERM equivalent on Windows without additional
+            // winapi wiring; the spawned restic-manager process is expected to
+            // terminate when its stdin/stdout pipes close on TUI exit.
+            let _ = ();
+        }
     }
 }
 
@@ -540,7 +562,9 @@ fn handle_key(
                 }
                 let a = Arc::clone(&app);
                 let config = config.clone();
-                std::thread::spawn(move || load_snapshots_async(a, config, job));
+                spawn_named("tui-load-snapshots", move || {
+                    load_snapshots_async(a, config, job)
+                });
             } else {
                 let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 a.set_status("Select a job first".to_string());
@@ -630,10 +654,7 @@ fn retreat_list_index(app: &mut App) {
 }
 
 fn command_running(app: &App) -> bool {
-    app.running_label
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_some()
+    app.running_label.is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -876,22 +897,20 @@ fn apply_snapshot_result(a: &mut App, job_name: &str, result: Result<SnapshotLis
 /// The child's PID is recorded in `app.child_pids` so the TUI can send SIGTERM
 /// to any remaining children on exit.
 fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
-    let (logs, child_pids) = {
+    let child_pids = {
         let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *a.running_label
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(label.clone());
+        a.running_label = Some(label.clone());
         a.push_log(format!("--- starting: {label} ---"));
-        // Return independent clones so the worker thread can clear state without
+        // Return an independent clone so the worker thread can clear state without
         // holding the main app mutex.
-        (Arc::clone(&a.running_label), Arc::clone(&a.child_pids))
+        Arc::clone(&a.child_pids)
     };
 
-    std::thread::spawn(move || {
+    spawn_named("tui-run-command", move || {
         let exe = match App::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
-                push_log_and_clear(&app, &logs, format!("error spawning command: {e}"));
+                push_log_and_clear(&app, format!("error spawning command: {e}"));
                 return;
             }
         };
@@ -904,7 +923,7 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
         {
             Ok(child) => child,
             Err(e) => {
-                push_log_and_clear(&app, &logs, format!("error spawning command: {e}"));
+                push_log_and_clear(&app, format!("error spawning command: {e}"));
                 return;
             }
         };
@@ -921,7 +940,7 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
         let app_stderr = Arc::clone(&app);
 
         if let Some(stdout) = stdout {
-            std::thread::spawn(move || {
+            spawn_named("tui-cmd-stdout", move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     let mut a = app_stdout
@@ -933,7 +952,7 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
         }
 
         if let Some(stderr) = stderr {
-            std::thread::spawn(move || {
+            spawn_named("tui-cmd-stderr", move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     let mut a = app_stderr
@@ -975,19 +994,15 @@ fn run_command(app: Arc<Mutex<App>>, label: String, args: Vec<String>) {
                 a.set_status(msg);
             }
             a.push_log(finish);
+            a.running_label = None;
         }
-        *logs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     });
 }
 
-fn push_log_and_clear(app: &Arc<Mutex<App>>, label: &Arc<Mutex<Option<String>>>, line: String) {
-    {
-        let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        a.push_log(line);
-    }
-    *label
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+fn push_log_and_clear(app: &Arc<Mutex<App>>, line: String) {
+    let mut a = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    a.push_log(line);
+    a.running_label = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,12 +1324,7 @@ fn build_status_text(app: &App) -> String {
         );
     }
 
-    if let Some(label) = app
-        .running_label
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-    {
+    if let Some(label) = app.running_label.as_ref() {
         return format!("running: {label}  ?:help  q:quit");
     }
 
