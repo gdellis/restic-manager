@@ -11,7 +11,8 @@ anything beyond build/test.
   process systemd wraps. `src/main.rs` calls into `cli_run` (re-exported from
   `src/lib.rs:14`).
 - `src/lib.rs` — module list: `backup`, `cli`, `cli_log`, `config`, `errors`, `exclude`,
-  `notifications`, `repository`, `restore`, `scheduler`, `secrets`, `snapshot`, `tui`. Read this first
+  `notifications`, `repository`, `restore`, `restic_child`, `scheduler`, `secrets`,
+  `redact`, `shutdown`, `snapshot`, `tui`. Read this first
   when tracing a command's flow.
 - `tests/daemon_shutdown.rs` — Linux-only (`#![cfg(target_os = "linux")]`) end-to-end tests
   of the SIGTERM/SIGINT drain contract. Uses `XDG_CONFIG_HOME` to point at scratch config.
@@ -64,8 +65,24 @@ here.
 
 ## Scratch space
 
+**Put all worktrees, tmp files, logs, and scratch artifacts under `./.omo/scratch/`**
+(or `./.scratch/`), never as siblings of the repo root. Everything under
+`/data/projects/restic-manager` is pre-approved for shell access; creating
+things outside the project tree forces per-command approvals and slows
+every agent down.
+
 Use `./.omo/session-work/` for temporary clones, downloaded references, logs, and agent
 scratch files. Keep durable QA evidence under `./.omo/evidence/` when needed.
+
+Worktrees for a branch go in `./.omo/scratch/wt-<short-desc>`:
+`git worktree add .omo/scratch/wt-<name> -b <type>/<desc> origin/main`.
+Clean worktrees up as soon as their PR merges.
+
+Cargo target dirs: the main checkout's `target/` has root-owned files (from an
+early Oct 30 root-user build) that break rebuilds with permission errors.
+Build with `CARGO_TARGET_DIR=<scratch dir>` instead, e.g.
+`CARGO_TARGET_DIR=.omo/scratch/target-main cargo test --all-targets`. Do not
+attempt to `rm` anything in the existing `target/`.
 
 The mid-stream handoff note (where the work stands, open PRs, next steps) lives at
 `./.omo/HANDOFF.md`. It is local session state, not repo documentation: read it first when
@@ -89,6 +106,15 @@ taking over, update it when you finish a phase, and never commit it.
   release's `action.yml` actually declares `using: node24` when bumping — the v5.0.0 release of
   `actions/upload-artifact` claimed Node 24 but its `action.yml` was not updated, so it needed
   a bump to v6.0.0 to actually fix the deprecation warning.
+- **Stale branch hygiene.** When a PR merges (squash) or closes, the agent should
+  delete its local branch, its remote branch (if pushed), and any associated
+  `.omo/scratch/wt-*` worktree in the same session. Abandoned worktrees accrue
+  drift and uncommitted work that has to be audited later. If a worktree holds
+  salvageable uncommitted work, stash it and note the stash name in
+  `.omo/HANDOFF.md` before removing the worktree.
+- **Never leave valuable work uncommitted only in a worktree.** Commit or stash
+  before leaving a branch idle; worktree deletions with `--force` destroy
+  uncommitted changes.
 
 ## Build matrix
 
@@ -117,3 +143,15 @@ finding a portable equivalent first.
 - **Merging pull requests**: an agent may create, push, and update PRs, but must wait
   for explicit user approval before merging. The user may also merge directly via the
   GitHub UI. Do not merge automatically, even if CI is green.
+- **Git credentials**: never inspect auth state, tokens, keyrings, or credential
+  helpers (`gh auth status`, etc.). Merges and other git/GitHub operations use the
+  user's existing `gh` CLI session as-is.
+- **Exclusions.d file-name rules are scoped.** A job name is validated as a file name
+  (`no / \ :`, not `.`/`..`) only when the job sets non-empty `exclude_patterns`;
+  jobs using `exclude_file` (or neither) have unrestricted names. Don't re-add the
+  unconditional check.
+- **Retention has no implicit defaults.** Since #143, `RetentionPolicy` fields
+  deserialize as `None` unless the config names them — a partially-specified policy
+  gets exactly the rules the user listed, and an empty `retention: {}` block is a
+  validation error. Use `RetentionPolicy::default_for_any_unset()` only where code
+  explicitly wants the old fill-in behaviour (tests do).
